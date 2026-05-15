@@ -1,4 +1,8 @@
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log};
+use std::collections::HashMap;
+
+use tetra_core::{
+    BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, address::SsiType, unimplemented_log,
+};
 use tetra_saps::{
     control::call_control::{Circuit, CircuitDlMediaSource},
     tmv::{TmvUnitdataReq, TmvUnitdataReqSlot, enums::logical_chans::LogicalChannel},
@@ -87,6 +91,15 @@ pub struct BsChannelScheduler {
     /// in the current frame. The second such PDU (e.g. DConnectAck MCCH) must be deferred to
     /// the next frame to avoid exceeding the 216-bit slot capacity (DConnect+DConnectAck=223 bits).
     mcch_chan_alloc_sent_this_frame: bool,
+
+    /// Per-MS TETRA energy-saving monitoring windows allocated by MM.
+    ee_windows: HashMap<u32, EnergySavingWindow>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EnergySavingWindow {
+    mode: u8,
+    start_time: TdmaTime,
 }
 
 #[derive(Debug)]
@@ -134,6 +147,7 @@ impl BsChannelScheduler {
             hangtime: [false, false, false, false],
             pending_ra_acks: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             mcch_chan_alloc_sent_this_frame: false,
+            ee_windows: HashMap::new(),
         }
     }
 
@@ -211,6 +225,81 @@ impl BsChannelScheduler {
                 if enabled { "ENABLED" } else { "DISABLED" }
             );
         }
+    }
+
+    pub fn set_energy_saving_window(&mut self, issi: u32, mode: u8, start_time: Option<TdmaTime>) {
+        match (mode, start_time) {
+            (0, _) | (_, None) => {
+                self.ee_windows.remove(&issi);
+                tracing::info!("BsChannelScheduler: cleared energy-saving window for ISSI {}", issi);
+            }
+            (1..=7, Some(start_time)) => {
+                self.ee_windows.insert(issi, EnergySavingWindow { mode, start_time });
+                tracing::info!("BsChannelScheduler: ISSI {} energy-saving mode {} start {}", issi, mode, start_time);
+            }
+            _ => {
+                tracing::warn!("BsChannelScheduler: ignoring invalid energy-saving mode {} for ISSI {}", mode, issi);
+            }
+        }
+    }
+
+    fn energy_saving_sleep_frames(mode: u8) -> Option<i32> {
+        match mode {
+            1 => Some(1),
+            2 => Some(2),
+            3 => Some(5),
+            4 => Some(8),
+            5 => Some(17),
+            6 => Some(71),
+            7 => Some(359),
+            _ => None,
+        }
+    }
+
+    fn is_ms_monitoring(&self, issi: u32, ts: TdmaTime) -> bool {
+        let Some(window) = self.ee_windows.get(&issi) else {
+            return true;
+        };
+        let Some(sleep_frames) = Self::energy_saving_sleep_frames(window.mode) else {
+            return true;
+        };
+
+        let frames_since_start = ts.diff(window.start_time).div_euclid(4);
+        if frames_since_start < 0 {
+            return true;
+        }
+
+        frames_since_start % (sleep_frames + 1) == 0
+    }
+
+    fn resource_is_ee_eligible(&self, pdu: &MacResource, ts: TdmaTime) -> bool {
+        if pdu.random_access_flag || pdu.slot_granting_element.is_some() {
+            return true;
+        }
+
+        let Some(addr) = pdu.addr else {
+            return true;
+        };
+        if addr.ssi_type != SsiType::Issi {
+            return true;
+        }
+
+        self.is_ms_monitoring(addr.ssi, ts)
+    }
+
+    fn fragger_is_ee_eligible(&self, fragger: &BsFragger, ts: TdmaTime) -> bool {
+        if fragger.has_started() || fragger.is_access_response() {
+            return true;
+        }
+
+        let Some(addr) = fragger.addr() else {
+            return true;
+        };
+        if addr.ssi_type != SsiType::Issi {
+            return true;
+        }
+
+        self.is_ms_monitoring(addr.ssi, ts)
     }
 
     /// Fully wipe the schedule
@@ -514,7 +603,11 @@ impl BsChannelScheduler {
     /// Use this to deliberately separate two MCCH messages that would overflow the slot
     /// if sent together (e.g. DConnect MCCH + DConnectAck MCCH = 223 bits > 216-bit slot).
     pub fn dl_enqueue_tma_next_frame(&mut self, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) {
-        tracing::debug!("dl_enqueue_tma_next_frame: deferring PDU {:?} SDU {} to next frame", pdu, sdu.dump_bin());
+        tracing::debug!(
+            "dl_enqueue_tma_next_frame: deferring PDU {:?} SDU {} to next frame",
+            pdu,
+            sdu.dump_bin()
+        );
         let elem = DlSchedElem::Resource(pdu, sdu, tx_reporter);
         self.dltx_next_slot_queue.push(elem);
     }
@@ -727,7 +820,7 @@ impl BsChannelScheduler {
             let addr = match &elem {
                 DlSchedElem::Grant(addr, _) => addr,
                 DlSchedElem::RandomAccessAck(addr) => addr,
-                _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+                _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
             };
             let mac_resource = self.dl_get_scheduled_resource_for_ssi(ts, addr);
             match mac_resource {
@@ -749,7 +842,7 @@ impl BsChannelScheduler {
                             );
                             pdu.random_access_flag = true;
                         }
-                        _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+                        _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
                     }
                 }
                 None => {
@@ -771,14 +864,14 @@ impl BsChannelScheduler {
                             );
                             Self::dl_make_minimal_resource(addr, None, true)
                         }
-                        _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+                        _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
                     };
 
                     // Push new resource into the queue. These do not need a tx_reporter
                     let dlsched_res = DlSchedElem::Resource(pdu, BitBuffer::new(0), None);
                     self.dltx_queues[ts.t as usize - 1].push(dlsched_res);
                 }
-                _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+                _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
             }
         }
     }
@@ -915,21 +1008,26 @@ impl BsChannelScheduler {
 
         // Map 1-based ts to 0-based index, bail on 0 or out of range.
         let slot = ts.t as usize - 1;
-        let q = self.dltx_queues.get_mut(slot).unwrap();
 
         // Return grants first
-        if let Some(i) = q.iter().position(|e| matches!(e, DlSchedElem::Grant(_, _))) {
-            return Some(q.remove(i));
+        if let Some(i) = self.dltx_queues[slot].iter().position(|e| matches!(e, DlSchedElem::Grant(_, _))) {
+            return Some(self.dltx_queues[slot].remove(i));
         }
 
         // Return FragBufs next
-        if let Some(i) = q.iter().position(|e| matches!(e, DlSchedElem::FragBuf(_))) {
-            return Some(q.remove(i));
+        if let Some(i) = self.dltx_queues[slot].iter().position(|e| match e {
+            DlSchedElem::FragBuf(fragger) => self.fragger_is_ee_eligible(fragger, ts),
+            _ => false,
+        }) {
+            return Some(self.dltx_queues[slot].remove(i));
         }
 
         // Return Resources last
-        if let Some(i) = q.iter().position(|e| matches!(e, DlSchedElem::Resource(_, _, _))) {
-            return Some(q.remove(i));
+        if let Some(i) = self.dltx_queues[slot].iter().position(|e| match e {
+            DlSchedElem::Resource(pdu, _, _) => self.resource_is_ee_eligible(pdu, ts),
+            _ => false,
+        }) {
+            return Some(self.dltx_queues[slot].remove(i));
         }
 
         None
@@ -1282,7 +1380,7 @@ impl BsChannelScheduler {
                             scrambling_code: self.scrambling_code,
                         }
                     }
-                    _ => unreachable!("BUG: unhandled match variant -- should never be reached") // never happens
+                    _ => unreachable!("BUG: unhandled match variant -- should never be reached"), // never happens
                 }
             }
             (1..=17, 2..=4) | (18, _) => {
@@ -1296,7 +1394,7 @@ impl BsChannelScheduler {
                     scrambling_code: scrambler::SCRAMB_INIT,
                 }
             }
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached") // never happens
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"), // never happens
         }
     }
 
@@ -1567,8 +1665,9 @@ mod tests {
         sched.dump_ul_schedule(true);
         let resreq2 = ReservationRequirement::Req3Slots;
         let Some(grant2) = sched.ul_process_cap_req(1, addr, &resreq2) else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
         tracing::info!("grant2: {:?}", grant2);
         sched.dump_ul_schedule(true);
 
@@ -1613,5 +1712,59 @@ mod tests {
         sched.dump_dl_queue();
 
         assert!(sched.dltx_queues[ts.t as usize - 1].len() == 1);
+    }
+
+    #[test]
+    fn test_ee_delays_sleeping_issi_resource_until_monitoring_frame() {
+        let mut sched = get_testing_slotter();
+        let addr = TetraAddress {
+            ssi_type: SsiType::Issi,
+            ssi: 1234,
+        };
+        let start = TdmaTime { t: 1, f: 5, m: 1, h: 0 };
+        let sleeping = TdmaTime { t: 1, f: 6, m: 1, h: 0 };
+        let monitoring = TdmaTime { t: 1, f: 7, m: 1, h: 0 };
+
+        sched.set_energy_saving_window(addr.ssi, 1, Some(start));
+        let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+        sched.dl_enqueue_tma(pdu, BitBuffer::new(0), None);
+
+        assert!(sched.dl_take_prioritized_sched_item(sleeping).is_none());
+        assert_eq!(sched.dltx_queues[sleeping.t as usize - 1].len(), 1);
+
+        assert!(matches!(
+            sched.dl_take_prioritized_sched_item(monitoring),
+            Some(DlSchedElem::Resource(_, _, _))
+        ));
+    }
+
+    #[test]
+    fn test_ee_keeps_pre_start_and_random_access_responses_awake() {
+        let mut sched = get_testing_slotter();
+        let addr = TetraAddress {
+            ssi_type: SsiType::Issi,
+            ssi: 1234,
+        };
+        let start = TdmaTime { t: 1, f: 5, m: 1, h: 0 };
+        let before_start = TdmaTime { t: 1, f: 4, m: 1, h: 0 };
+        let sleeping = TdmaTime { t: 1, f: 6, m: 1, h: 0 };
+
+        sched.set_energy_saving_window(addr.ssi, 1, Some(start));
+        let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+        sched.dl_enqueue_tma(pdu, BitBuffer::new(0), None);
+        assert!(matches!(
+            sched.dl_take_prioritized_sched_item(before_start),
+            Some(DlSchedElem::Resource(_, _, _))
+        ));
+
+        let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+        sched.dl_enqueue_tma(pdu, BitBuffer::new(0), None);
+        sched.dl_enqueue_random_access_ack(sleeping.t, addr);
+        sched.dl_integrate_sched_elems_for_timeslot(sleeping);
+
+        let Some(DlSchedElem::Resource(pdu, _, _)) = sched.dl_take_prioritized_sched_item(sleeping) else {
+            panic!("expected random-access response to remain immediate");
+        };
+        assert!(pdu.random_access_flag);
     }
 }

@@ -1,6 +1,6 @@
 use std::cmp::min;
 
-use tetra_core::{BitBuffer, TxReporter};
+use tetra_core::{BitBuffer, TetraAddress, TxReporter};
 
 use tetra_pdus::umac::pdus::{mac_end_dl::MacEndDl, mac_frag_dl::MacFragDl, mac_resource::MacResource};
 
@@ -33,6 +33,18 @@ impl BsFragger {
             sdu,
             tx_reporter,
         }
+    }
+
+    pub fn addr(&self) -> Option<TetraAddress> {
+        self.resource.addr
+    }
+
+    pub fn has_started(&self) -> bool {
+        self.mac_hdr_is_written
+    }
+
+    pub fn is_access_response(&self) -> bool {
+        self.resource.random_access_flag || self.resource.slot_granting_element.is_some()
     }
 
     /// Writes MAC-RESOURCE to dest_buf, starting fragmentation if needed.

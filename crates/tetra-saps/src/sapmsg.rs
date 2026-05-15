@@ -1,7 +1,7 @@
 use core::fmt::Display;
 
-use tetra_core::Sap;
 use tetra_core::tetra_entities::TetraEntity;
+use tetra_core::{Sap, TdmaTime};
 
 use crate::control::brew::MmSubscriberUpdate;
 use crate::control::call_control::CallControl;
@@ -82,7 +82,18 @@ pub enum SapMsgInner {
 
     /// Sent by UMAC to MM when a UL burst is received from a known MS.
     /// MM stores the RSSI value per MS for logging and future handover decisions.
-    MsRssiUpdate { issi: u32, rssi_dbfs: f32 },
+    MsRssiUpdate {
+        issi: u32,
+        rssi_dbfs: f32,
+    },
+
+    /// Sent by MM to UMAC when an MS energy-saving monitoring window changes.
+    /// mode=0 means StayAlive and clears any stored EE window.
+    MmEnergySavingUpdate {
+        issi: u32,
+        mode: u8,
+        start_time: Option<TdmaTime>,
+    },
 
     /// Sent by BrewEntity to MM when the Brew backhaul reconnects.
     /// MM responds by sending D-LOCATION-UPDATE-COMMAND to all locally registered MS,
@@ -124,6 +135,9 @@ impl Display for SapMsgInner {
             // Control/Brew
             SapMsgInner::MmSubscriberUpdate(_) => write!(f, "MmSubscriberUpdate"),
             SapMsgInner::MsRssiUpdate { issi, rssi_dbfs } => write!(f, "MsRssiUpdate(issi={}, rssi={:.1}dBFS)", issi, rssi_dbfs),
+            SapMsgInner::MmEnergySavingUpdate { issi, mode, start_time } => {
+                write!(f, "MmEnergySavingUpdate(issi={}, mode={}, start={:?})", issi, mode, start_time)
+            }
 
             // TLB-SAP
             // SapMsgInner::TlbTlSyncInd(_) => write!(f, "TlbTlSyncInd"),

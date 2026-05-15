@@ -57,11 +57,14 @@ fn test_u_mm_status_energy_saving() {
         resp_pdu.status_downlink,
         tetra_pdus::mm::enums::status_downlink::StatusDownlink::ChangeOfEnergySavingModeResponse
     );
-    assert!(resp_pdu.energy_saving_information.is_some());
+    let esi = resp_pdu.energy_saving_information.expect("expected energy saving information");
+    assert_ne!(esi.energy_saving_mode, EnergySavingMode::StayAlive);
+    assert!(esi.frame_number.is_some());
+    assert!(esi.multiframe_number.is_some());
 }
 
 #[test]
-fn test_location_update_energy_saving_forced_stay_alive() {
+fn test_location_update_energy_saving_grants_monitoring_window() {
     debug::setup_logging_verbose();
 
     let lud_with_eg1 =
@@ -83,7 +86,7 @@ fn test_location_update_energy_saving_forced_stay_alive() {
 
     let dltime = TdmaTime::default().add_timeslots(2);
     let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
-    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle]);
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Umac]);
 
     test.submit_message(test_sapmsg);
     test.run_stack(Some(1));
@@ -104,7 +107,24 @@ fn test_location_update_energy_saving_forced_stay_alive() {
     let resp_pdu = DLocationUpdateAccept::from_bitbuf(&mut resp_sdu).expect("failed parsing D-LOCATION UPDATE ACCEPT");
     let esi = resp_pdu.energy_saving_information.expect("expected energy saving information");
 
-    assert_eq!(esi.energy_saving_mode, EnergySavingMode::StayAlive);
-    assert_eq!(esi.frame_number, None);
-    assert_eq!(esi.multiframe_number, None);
+    assert_eq!(esi.energy_saving_mode, EnergySavingMode::Eg1);
+    assert!(esi.frame_number.is_some());
+    assert!(esi.multiframe_number.is_some());
+
+    let umac_update = sink_msgs
+        .iter()
+        .find_map(|msg| {
+            if let SapMsgInner::MmEnergySavingUpdate { issi, mode, start_time } = msg.msg {
+                Some((issi, mode, start_time))
+            } else {
+                None
+            }
+        })
+        .expect("expected MM energy-saving update to UMAC");
+
+    assert_eq!(umac_update.0, 2260616);
+    assert_eq!(umac_update.1, EnergySavingMode::Eg1 as u8);
+    let start_time = umac_update.2.expect("expected UMAC start time");
+    assert_eq!(Some(start_time.f), esi.frame_number);
+    assert_eq!(Some(start_time.m), esi.multiframe_number);
 }

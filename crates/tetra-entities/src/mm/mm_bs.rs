@@ -37,6 +37,7 @@ pub struct MmBs {
     telemetry: Option<TelemetrySink>,
     control: Option<ControlEndpoint>,
     client_mgr: MmClientMgr,
+    current_dl_time: TdmaTime,
 }
 
 impl MmBs {
@@ -47,7 +48,68 @@ impl MmBs {
             telemetry,
             control,
             client_mgr,
+            current_dl_time: TdmaTime::default(),
         }
+    }
+
+    fn allocate_energy_saving_information(&self, requested: EnergySavingMode) -> (EnergySavingInformation, Option<TdmaTime>) {
+        if requested == EnergySavingMode::StayAlive {
+            return (
+                EnergySavingInformation {
+                    energy_saving_mode: EnergySavingMode::StayAlive,
+                    frame_number: None,
+                    multiframe_number: None,
+                },
+                None,
+            );
+        }
+
+        // ETSI EE starts at a frame/multiframe boundary. Pick a conservative future
+        // point so the current acknowledged signalling exchange is completed while
+        // the MS is still continuously receiving.
+        let mut start = self.current_dl_time.add_timeslots(2 * 18 * 4).forward_to_timeslot(1);
+        if start.f == 18 {
+            start = start.add_timeslots(4);
+        }
+
+        (
+            EnergySavingInformation {
+                energy_saving_mode: requested,
+                frame_number: Some(start.f),
+                multiframe_number: Some(start.m),
+            },
+            Some(start),
+        )
+    }
+
+    fn store_and_emit_energy_saving(
+        &mut self,
+        queue: &mut MessageQueue,
+        issi: u32,
+        esi: Option<&EnergySavingInformation>,
+        start_time: Option<TdmaTime>,
+    ) {
+        let mode = esi.map(|e| e.energy_saving_mode).unwrap_or(EnergySavingMode::StayAlive);
+        let frame = esi.and_then(|e| e.frame_number);
+        let multiframe = esi.and_then(|e| e.multiframe_number);
+
+        if let Err(e) = self.client_mgr.set_client_energy_saving_mode(issi, mode) {
+            tracing::warn!("MM: failed updating energy-saving mode for MS {}: {:?}", issi, e);
+        }
+        if let Err(e) = self.client_mgr.set_client_monitoring_window(issi, frame, multiframe) {
+            tracing::warn!("MM: failed updating energy-saving window for MS {}: {:?}", issi, e);
+        }
+
+        queue.push_back(SapMsg {
+            sap: Sap::Control,
+            src: TetraEntity::Mm,
+            dest: TetraEntity::Umac,
+            msg: SapMsgInner::MmEnergySavingUpdate {
+                issi,
+                mode: mode as u8,
+                start_time,
+            },
+        });
     }
 
     fn emit_subscriber_update(&self, queue: &mut MessageQueue, issi: u32, groups: Vec<u32>, action: BrewSubscriberAction) {
@@ -93,11 +155,12 @@ impl MmBs {
         queue.push_back(msg);
     }
 
-    fn rx_u_itsi_detach(&mut self, _queue: &mut MessageQueue, mut message: SapMsg) {
+    fn rx_u_itsi_detach(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_u_itsi_detach");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let pdu = match UItsiDetach::from_bitbuf(&mut prim.sdu) {
             Ok(pdu) => {
@@ -122,9 +185,10 @@ impl MmBs {
             self.config.state_write().subscribers.deregister(ssi);
             if !client.groups.is_empty() {
                 let groups: Vec<u32> = client.groups.iter().copied().collect();
-                self.emit_subscriber_update(_queue, ssi, groups, BrewSubscriberAction::Deaffiliate);
+                self.emit_subscriber_update(queue, ssi, groups, BrewSubscriberAction::Deaffiliate);
             }
-            self.emit_subscriber_update(_queue, ssi, Vec::new(), BrewSubscriberAction::Deregister);
+            self.emit_subscriber_update(queue, ssi, Vec::new(), BrewSubscriberAction::Deregister);
+            self.store_and_emit_energy_saving(queue, ssi, None, None);
         } else {
             tracing::warn!("Received UItsiDetach for unknown client with SSI: {}", ssi);
             // return;
@@ -134,8 +198,9 @@ impl MmBs {
     fn rx_u_location_update_demand(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_location_update_demand");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let pdu = match ULocationUpdateDemand::from_bitbuf(&mut prim.sdu) {
             Ok(pdu) => {
@@ -169,14 +234,9 @@ impl MmBs {
                     self.emit_subscriber_update(queue, issi, groups, BrewSubscriberAction::Deaffiliate);
                 }
                 self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
+                self.store_and_emit_energy_saving(queue, issi, None, None);
             }
-            Self::send_d_location_update_reject(
-                queue,
-                issi,
-                prim.handle,
-                pdu.location_update_type,
-                pdu.address_extension,
-            );
+            Self::send_d_location_update_reject(queue, issi, prim.handle, pdu.location_update_type, pdu.address_extension);
             return;
         }
 
@@ -186,27 +246,26 @@ impl MmBs {
             return;
         }
 
-        // Handle Energy Saving Mode request (clause 23.7.6).
-        // Always override to StayAlive. The current DL scheduler does not fully track
-        // per-MS monitoring patterns, so non-StayAlive modes can make terminals miss
-        // acknowledged downlink signalling such as location-update accepts and setup.
-        // Per clause 16.7.1 NOTE 1: "The BS may allocate a different energy saving mode
-        // than requested and the BS assumes that the allocated value will be used."
-        let esi = if let Some(esm) = pdu.energy_saving_mode {
-            if esm != EnergySavingMode::StayAlive {
+        // Handle Energy Saving Mode request (ETSI EN 300 392-2, clauses 16.10.10/23.7.6).
+        // Allocate a future start point so the accept and any immediate follow-up signalling
+        // are delivered before the MS begins periodic monitoring.
+        let (esi, esi_start_time) = if let Some(esm) = pdu.energy_saving_mode {
+            let (esi, start_time) = self.allocate_energy_saving_information(esm);
+            if let Some(start_time) = start_time {
                 tracing::info!(
-                    "MS {} requested energy saving mode {:?}, overriding to StayAlive",
+                    "MS {} granted {:?}: monitoring starts frame={} multiframe={} ({})",
                     prim.received_address.ssi,
-                    esm,
+                    esi.energy_saving_mode,
+                    esi.frame_number.unwrap_or(0),
+                    esi.multiframe_number.unwrap_or(0),
+                    start_time,
                 );
+            } else {
+                tracing::info!("MS {} granted StayAlive", prim.received_address.ssi);
             }
-            Some(EnergySavingInformation {
-                energy_saving_mode: EnergySavingMode::StayAlive,
-                frame_number: None,
-                multiframe_number: None,
-            })
+            (Some(esi), start_time)
         } else {
-            None
+            (None, None)
         };
 
         // Try to register the client
@@ -216,13 +275,7 @@ impl MmBs {
         // ISSI whitelist check — reject if whitelist is non-empty and ISSI not in it
         if !self.config.config().security.is_issi_allowed(issi) {
             tracing::warn!("MM: ISSI {} not in whitelist, rejecting registration", issi);
-            Self::send_d_location_update_reject(
-                queue,
-                issi,
-                handle,
-                pdu.location_update_type,
-                pdu.address_extension,
-            );
+            Self::send_d_location_update_reject(queue, issi, handle, pdu.location_update_type, pdu.address_extension);
             return;
         }
 
@@ -246,7 +299,8 @@ impl MmBs {
             // needs_cleanup: Roaming = MS rebooted, need CMCE reset
             // was_pending: T351 expired, we already sent Deregister to Brew — just re-register
             if needs_cleanup {
-                let old_groups: Vec<u32> = self.client_mgr
+                let old_groups: Vec<u32> = self
+                    .client_mgr
                     .get_client_by_issi(issi)
                     .map(|c| c.groups.iter().copied().collect())
                     .unwrap_or_default();
@@ -288,7 +342,10 @@ impl MmBs {
         }
         if needs_brew_register {
             if !is_new {
-                tracing::info!("MM: ISSI {} re-attaching via ItsiAttach (returned from another network) — re-registering in Brew", issi);
+                tracing::info!(
+                    "MM: ISSI {} re-attaching via ItsiAttach (returned from another network) — re-registering in Brew",
+                    issi
+                );
             }
             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
         }
@@ -297,10 +354,9 @@ impl MmBs {
         // (e.g. D-LOCATION-UPDATE-COMMAND after Brew reconnection).
         self.client_mgr.set_client_handle(issi, handle);
 
-        // Store energy saving mode and clear any prior monitoring window.
-        let esm = esi.as_ref().map(|e| e.energy_saving_mode).unwrap_or(EnergySavingMode::StayAlive);
-        let _ = self.client_mgr.set_client_energy_saving_mode(issi, esm);
-        let _ = self.client_mgr.set_client_monitoring_window(issi, None, None);
+        // Store energy saving mode and notify UMAC so addressed downlink is scheduled
+        // on monitoring frames for sleeping MSs.
+        self.store_and_emit_energy_saving(queue, issi, esi.as_ref(), esi_start_time);
 
         // Process optional GroupIdentityLocationDemand field
         let _has_groups = pdu.group_identity_location_demand.is_some();
@@ -354,13 +410,10 @@ impl MmBs {
         // Without this, MS with scan list active stays in scan mode and blocks PTT.
         // Value 0x01: 1 SCCH on frame 18, assigned to TS1 (our MCCH/control channel).
         // Bits: b1-b2 = 01 (1 SCCH), b3-b6 = 0000 (TS2/3/4 not used as SCCH).
-        let scch_info = pdu.class_of_ms.as_ref().and_then(|c| {
-            if c.clch_needed || c.common_scch {
-                Some(0x01u64)
-            } else {
-                None
-            }
-        });
+        let scch_info = pdu
+            .class_of_ms
+            .as_ref()
+            .and_then(|c| if c.clch_needed || c.common_scch { Some(0x01u64) } else { None });
 
         let _ = self.client_mgr.set_client_class_of_ms(issi, pdu.class_of_ms);
 
@@ -436,8 +489,9 @@ impl MmBs {
     fn rx_u_mm_status(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_u_mm_status");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let pdu = match UMmStatus::from_bitbuf(&mut prim.sdu) {
             Ok(pdu) => {
@@ -470,25 +524,21 @@ impl MmBs {
                     EnergySavingMode::StayAlive
                 };
 
-                if esm != EnergySavingMode::StayAlive {
+                let (esi, start_time) = self.allocate_energy_saving_information(esm);
+                if let Some(start_time) = start_time {
                     tracing::info!(
-                        "MS {} requested energy saving mode change to {:?}, overriding to StayAlive",
+                        "MS {} energy saving mode change request {:?}: monitoring starts frame={} multiframe={} ({})",
                         issi,
-                        esm
+                        esm,
+                        esi.frame_number.unwrap_or(0),
+                        esi.multiframe_number.unwrap_or(0),
+                        start_time,
                     );
                 } else {
                     tracing::info!("MS {} energy saving mode change request: StayAlive", issi);
                 }
 
-                // Store StayAlive (see clause 16.7.1 NOTE 1)
-                let _ = self.client_mgr.set_client_energy_saving_mode(issi, EnergySavingMode::StayAlive);
-
-                // Respond with StayAlive
-                let esi = EnergySavingInformation {
-                    energy_saving_mode: EnergySavingMode::StayAlive,
-                    frame_number: None,
-                    multiframe_number: None,
-                };
+                self.store_and_emit_energy_saving(queue, issi, Some(&esi), start_time);
                 Self::send_d_mm_status_energy_saving(queue, issi, handle, esi);
                 handled = true;
             }
@@ -507,7 +557,11 @@ impl MmBs {
                 };
 
                 tracing::info!("MS {} energy saving mode change response: {:?}", issi, esm);
-                let _ = self.client_mgr.set_client_energy_saving_mode(issi, esm);
+                if esm == EnergySavingMode::StayAlive {
+                    self.store_and_emit_energy_saving(queue, issi, None, None);
+                } else if let Err(e) = self.client_mgr.set_client_energy_saving_mode(issi, esm) {
+                    tracing::warn!("MM: failed updating energy-saving response for MS {}: {:?}", issi, e);
+                }
                 handled = true;
             }
             StatusUplink::DualWatchModeRequest
@@ -548,8 +602,9 @@ impl MmBs {
     fn rx_u_attach_detach_group_identity(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_u_attach_detach_group_identity");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let issi = prim.received_address.ssi;
 
@@ -569,8 +624,12 @@ impl MmBs {
             // group_identity_uplink missing — terminal is sending a group report response
             // without requesting any group changes. Send ACK with current groups so
             // terminal knows it's affiliated and can use PTT.
-            tracing::info!("UAttachDetachGroupIdentity from {} has no uplink groups — sending ACK with current groups", issi);
-            let current_groups: Vec<u32> = self.client_mgr
+            tracing::info!(
+                "UAttachDetachGroupIdentity from {} has no uplink groups — sending ACK with current groups",
+                issi
+            );
+            let current_groups: Vec<u32> = self
+                .client_mgr
                 .get_client_by_issi(issi)
                 .map(|c| c.groups.iter().copied().collect())
                 .unwrap_or_default();
@@ -664,8 +723,9 @@ impl MmBs {
     fn rx_lmm_mle_unitdata_ind(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         // unimplemented_log!("rx_lmm_mle_unitdata_ind for MM component");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let Some(bits) = prim.sdu.peek_bits(4) else {
             tracing::warn!("insufficient bits: {}", prim.sdu.dump_bin());
@@ -776,7 +836,8 @@ impl MmBs {
         // Emit a single snapshot of all current groups so the dashboard always has
         // the full list (not just incremental add/remove events).
         let _sink = self.client_mgr.telemetry_sink().cloned();
-        let all_groups: Vec<u32> = self.client_mgr
+        let all_groups: Vec<u32> = self
+            .client_mgr
             .get_client_by_issi(issi)
             .map(|c| c.groups.iter().copied().collect())
             .unwrap_or_default();
@@ -823,18 +884,21 @@ impl MmBs {
     }
 
     fn send_d_attach_detach_ack(&self, queue: &mut MessageQueue, issi: u32, handle: u32, groups: &[u32]) {
-        use tetra_pdus::mm::fields::group_identity_downlink::GroupIdentityDownlink;
         use tetra_pdus::mm::fields::group_identity_attachment::GroupIdentityAttachment;
-        let gid: Vec<GroupIdentityDownlink> = groups.iter().map(|&gssi| GroupIdentityDownlink {
-            group_identity_attachment: Some(GroupIdentityAttachment {
-                group_identity_attachment_lifetime: 1,
-                class_of_usage: 4,
-            }),
-            group_identity_detachment_uplink: None,
-            gssi: Some(gssi),
-            address_extension: None,
-            vgssi: None,
-        }).collect();
+        use tetra_pdus::mm::fields::group_identity_downlink::GroupIdentityDownlink;
+        let gid: Vec<GroupIdentityDownlink> = groups
+            .iter()
+            .map(|&gssi| GroupIdentityDownlink {
+                group_identity_attachment: Some(GroupIdentityAttachment {
+                    group_identity_attachment_lifetime: 1,
+                    class_of_usage: 4,
+                }),
+                group_identity_detachment_uplink: None,
+                gssi: Some(gssi),
+                address_extension: None,
+                vgssi: None,
+            })
+            .collect();
         let ack = DAttachDetachGroupIdentityAcknowledgement {
             group_identity_accept_reject: 0,
             reserved: false,
@@ -908,8 +972,12 @@ impl MmBs {
         address_extension: Option<u64>,
     ) {
         Self::send_d_location_update_reject_cause(
-            queue, issi, handle, location_update_type,
-            address_extension, RejectCause::MigrationNotSupported,
+            queue,
+            issi,
+            handle,
+            location_update_type,
+            address_extension,
+            RejectCause::MigrationNotSupported,
         )
     }
 
@@ -1000,7 +1068,8 @@ impl MmBs {
     fn rx_u_tei_provide(&mut self, _queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_u_tei_provide");
         let SapMsgInner::LmmMleUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
 
         let pdu = match UTeiProvide::from_bitbuf(&mut prim.sdu) {
@@ -1015,12 +1084,7 @@ impl MmBs {
         };
 
         let issi = prim.received_address.ssi;
-        tracing::info!(
-            "MM: TEI received from ISSI {} → TEI={} ({:060b})",
-            issi,
-            pdu.tei_hex(),
-            pdu.tei,
-        );
+        tracing::info!("MM: TEI received from ISSI {} → TEI={} ({:060b})", issi, pdu.tei_hex(), pdu.tei,);
 
         // Store TEI in client state for future use (e.g. whitelist checking)
         if let Err(e) = self.client_mgr.set_client_tei(issi, pdu.tei) {
@@ -1104,7 +1168,9 @@ impl TetraEntityTrait for MmBs {
         self.config = config;
     }
 
-    fn tick_start(&mut self, queue: &mut MessageQueue, _ts: TdmaTime) {
+    fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
+        self.current_dl_time = ts;
+
         if let Some(cep) = &self.control {
             while let Some(cmd) = cep.try_recv() {
                 match cmd {
@@ -1122,7 +1188,8 @@ impl TetraEntityTrait for MmBs {
         for issi in expired {
             tracing::info!(
                 "MM: ISSI {} periodic registration expired ({}s) — sending D-LOCATION-UPDATE-COMMAND",
-                issi, interval_secs
+                issi,
+                interval_secs
             );
             // Send D-LOCATION-UPDATE-COMMAND to prompt re-registration.
             //
@@ -1143,10 +1210,7 @@ impl TetraEntityTrait for MmBs {
             if already_sent {
                 // Second expiry — terminal didn't respond to COMMAND within grace period.
                 // Remove silently: terminal is powered off or out of coverage.
-                tracing::info!(
-                    "MM: ISSI {} did not respond to D-LOCATION-UPDATE-COMMAND — removing",
-                    issi
-                );
+                tracing::info!("MM: ISSI {} did not respond to D-LOCATION-UPDATE-COMMAND — removing", issi);
                 let detached = self.client_mgr.remove_client(issi);
                 if let Some(client) = detached {
                     self.config.state_write().subscribers.deregister(issi);
@@ -1164,7 +1228,8 @@ impl TetraEntityTrait for MmBs {
             // Only notify Brew so it stops routing calls to this terminal until it re-registers.
             Self::send_d_location_update_command(queue, issi, 0);
             self.client_mgr.set_pending_command(issi, 60);
-            let groups: Vec<u32> = self.client_mgr
+            let groups: Vec<u32> = self
+                .client_mgr
                 .get_client_by_issi(issi)
                 .map(|c| c.groups.iter().copied().collect())
                 .unwrap_or_default();
@@ -1182,16 +1247,15 @@ impl TetraEntityTrait for MmBs {
         // tracing::debug!(ts=%message.dltime, "rx_prim: {:?}", message);
 
         match message.sap {
-            Sap::LmmSap => {
-                match message.msg {
-                    SapMsgInner::LmmMleUnitdataInd(_) => {
-                        self.rx_lmm_mle_unitdata_ind(queue, message);
-                    }
-                    _ => {
-                        tracing::error!("BUG: unexpected message or state -- routing error"); return;
-                    }
+            Sap::LmmSap => match message.msg {
+                SapMsgInner::LmmMleUnitdataInd(_) => {
+                    self.rx_lmm_mle_unitdata_ind(queue, message);
                 }
-            }
+                _ => {
+                    tracing::error!("BUG: unexpected message or state -- routing error");
+                    return;
+                }
+            },
             Sap::Control => {
                 match message.msg {
                     SapMsgInner::BrewReconnected => {
@@ -1208,13 +1272,17 @@ impl TetraEntityTrait for MmBs {
                         // CMCE can ask MM to deregister an MS (e.g. kick from dashboard)
                         if update.action == BrewSubscriberAction::Deregister {
                             let issi = update.issi;
-                            tracing::info!("MM: kicking ISSI {} — sending D-LOCATION-UPDATE-COMMAND to force re-registration", issi);
+                            tracing::info!(
+                                "MM: kicking ISSI {} — sending D-LOCATION-UPDATE-COMMAND to force re-registration",
+                                issi
+                            );
                             // D-LOCATION-UPDATE-COMMAND forces the terminal to immediately
                             // send a new U-LOCATION-UPDATING-DEMAND, effectively re-registering.
                             // This is cleaner than a reject: the terminal stays on the network
                             // but goes through a full re-registration cycle.
                             Self::send_d_location_update_command(queue, issi, 0);
-                            let groups: Vec<u32> = self.client_mgr
+                            let groups: Vec<u32> = self
+                                .client_mgr
                                 .get_client_by_issi(issi)
                                 .map(|c| c.groups.iter().copied().collect())
                                 .unwrap_or_default();
