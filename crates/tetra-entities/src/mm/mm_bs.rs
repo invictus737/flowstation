@@ -187,58 +187,23 @@ impl MmBs {
         }
 
         // Handle Energy Saving Mode request (clause 23.7.6).
-        // We honour the mode requested by the MS (capped at Eg3 for safety).
-        // LLC retransmissions ensure DL messages are delivered even when the MS is sleeping:
-        // the BS retransmits on the next monitoring window automatically.
-        // frame_number and multiframe_number are derived from ISSI to spread MSs evenly
-        // across monitoring slots and avoid simultaneous wake-ups.
+        // Always override to StayAlive. The current DL scheduler does not fully track
+        // per-MS monitoring patterns, so non-StayAlive modes can make terminals miss
+        // acknowledged downlink signalling such as location-update accepts and setup.
         // Per clause 16.7.1 NOTE 1: "The BS may allocate a different energy saving mode
         // than requested and the BS assumes that the allocated value will be used."
-        // For DemandLocationUpdating (response to D-LOCATION-UPDATE-COMMAND), the terminal
-        // often omits energy_saving_mode from the PDU. In that case, reuse the previously
-        // stored ESM — client_mgr retains it because we no longer remove_client at T351 expiry.
-        // Preserve energy saving mode across re-registrations.
-        // If the terminal omits ESM from the PDU (common after T351 expiry),
-        // reuse the previously granted mode so the terminal stays in EE mode.
-        // We no longer filter out StayAlive — if that's what was granted before, keep it.
-        let prior_esm = self.client_mgr.get_client_by_issi(prim.received_address.ssi)
-            .map(|c| c.energy_saving_mode);
-        let effective_esm_request = pdu.energy_saving_mode.or(prior_esm);
-
-        let esi = if let Some(esm) = effective_esm_request {
-            // Cap at Eg3 (~3s max delay) to avoid excessive call setup latency
-            let granted_esm = match esm {
-                EnergySavingMode::StayAlive => EnergySavingMode::StayAlive,
-                EnergySavingMode::Eg1 => EnergySavingMode::Eg1,
-                EnergySavingMode::Eg2 => EnergySavingMode::Eg2,
-                EnergySavingMode::Eg3 => EnergySavingMode::Eg3,
-                // Cap Eg4-Eg7 to Eg3
-                _ => EnergySavingMode::Eg3,
-            };
-
-            if granted_esm != esm {
-                tracing::debug!("MS {} requested {:?}, capping to {:?}", prim.received_address.ssi, esm, granted_esm);
-            }
-
-            let (frame_number, multiframe_number) = if granted_esm == EnergySavingMode::StayAlive {
-                (None, None)
-            } else {
-                // Spread MSs evenly: frame 0-17, multiframe offset within Eg cycle
-                let cycle_len = granted_esm as u8 + 1; // Eg1=2, Eg2=3, Eg3=4
-                // TETRA frames are 1-indexed (1..18); use 1..=18 to avoid frame 0
-                let frame_num = ((prim.received_address.ssi % 18) + 1) as u8;
-                let mframe_num = ((prim.received_address.ssi / 18) % cycle_len as u32) as u8;
+        let esi = if let Some(esm) = pdu.energy_saving_mode {
+            if esm != EnergySavingMode::StayAlive {
                 tracing::info!(
-                    "MS {} granted {:?}: monitoring frame={} multiframe={}",
-                    prim.received_address.ssi, granted_esm, frame_num, mframe_num
+                    "MS {} requested energy saving mode {:?}, overriding to StayAlive",
+                    prim.received_address.ssi,
+                    esm,
                 );
-                (Some(frame_num), Some(mframe_num))
-            };
-
+            }
             Some(EnergySavingInformation {
-                energy_saving_mode: granted_esm,
-                frame_number,
-                multiframe_number,
+                energy_saving_mode: EnergySavingMode::StayAlive,
+                frame_number: None,
+                multiframe_number: None,
             })
         } else {
             None
@@ -332,13 +297,10 @@ impl MmBs {
         // (e.g. D-LOCATION-UPDATE-COMMAND after Brew reconnection).
         self.client_mgr.set_client_handle(issi, handle);
 
-        // Store energy saving mode and monitoring window in client state
+        // Store energy saving mode and clear any prior monitoring window.
         let esm = esi.as_ref().map(|e| e.energy_saving_mode).unwrap_or(EnergySavingMode::StayAlive);
         let _ = self.client_mgr.set_client_energy_saving_mode(issi, esm);
-        let mf = esi.as_ref().and_then(|e| e.frame_number);
-        let mmf = esi.as_ref().and_then(|e| e.multiframe_number);
-        let _ = self.client_mgr.set_client_monitoring_window(issi, mf, mmf);
-
+        let _ = self.client_mgr.set_client_monitoring_window(issi, None, None);
 
         // Process optional GroupIdentityLocationDemand field
         let _has_groups = pdu.group_identity_location_demand.is_some();
