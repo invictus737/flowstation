@@ -29,7 +29,10 @@ impl CcBsSubentity {
         // Allocate circuit (DL+UL for group call)
         let circuit = match {
             let mut state = self.config.state_write();
-            self.circuits.allocate_circuit_with_allocator_duplex(Direction::Both, pdu.basic_service_information.communication_type, pdu.simplex_duplex_selection,
+            self.circuits.allocate_circuit_with_allocator_duplex(
+                Direction::Both,
+                pdu.basic_service_information.communication_type,
+                pdu.simplex_duplex_selection,
                 &mut state.timeslot_alloc,
                 TimeslotOwner::Cmce,
             )
@@ -66,11 +69,14 @@ impl CcBsSubentity {
 
         // Extract UL message routing info for individually-addressed responses.
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
         let ul_handle = prim.handle;
         let ul_link_id = prim.link_id;
         let ul_endpoint_id = prim.endpoint_id;
+        self.tpi_start_context(circuit.call_id, TpiCallType::Group, calling_party.ssi, pdu.clir_control != 0);
+        let tpi_facility = self.tpi_inform_for_call(circuit.call_id);
 
         // 1) D-CALL-PROCEEDING to caller.
         self.send_d_call_proceeding(
@@ -95,7 +101,7 @@ impl CcBsSubentity {
             basic_service_information: None,
             temporary_address: None,
             notification_indicator: None,
-            facility: None,
+            facility: tpi_facility.clone(),
             proprietary: None,
         };
 
@@ -146,7 +152,7 @@ impl CcBsSubentity {
             calling_party_address_ssi: Some(calling_party.ssi),
             calling_party_extension: None,
             external_subscriber_number: None,
-            facility: None,
+            facility: tpi_facility,
             dm_ms_address: None,
             proprietary: None,
         };
@@ -157,6 +163,7 @@ impl CcBsSubentity {
                 pdu: d_setup,
                 dest_addr,
                 resend: true,
+                last_reporter: None,
                 is_individual: false,
             },
         );
@@ -205,10 +212,12 @@ impl CcBsSubentity {
         calling_party: TetraAddress,
     ) {
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
-        let is_issi_address = pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Ssi || pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi;
+        let is_issi_address = pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Ssi
+            || pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi;
         if !is_issi_address && !net_brew::is_active(&self.config) {
             tracing::warn!(
                 "U-SETUP P2P with non-ISSI called_party_type_identifier={} (rejecting, Brew disabled)",
@@ -218,7 +227,8 @@ impl CcBsSubentity {
         }
         if is_issi_address
             && (pdu.called_party_short_number_address.is_some()
-                || (pdu.called_party_extension.is_some() && pdu.called_party_type_identifier != tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi))
+                || (pdu.called_party_extension.is_some()
+                    && pdu.called_party_type_identifier != tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi))
         {
             tracing::warn!("U-SETUP P2P with invalid called party fields (short number/extension mismatch), rejecting");
             return;
@@ -268,7 +278,10 @@ impl CcBsSubentity {
         // Allocate circuit(s). Duplex uses two traffic timeslots, one per MS, with cross-routing.
         let (circuit_calling, circuit_called) = {
             let mut state = self.config.state_write();
-            let circuit_calling = match self.circuits.allocate_circuit_with_allocator_duplex(Direction::Both, pdu.basic_service_information.communication_type, pdu.simplex_duplex_selection,
+            let circuit_calling = match self.circuits.allocate_circuit_with_allocator_duplex(
+                Direction::Both,
+                pdu.basic_service_information.communication_type,
+                pdu.simplex_duplex_selection,
                 &mut state.timeslot_alloc,
                 TimeslotOwner::Cmce,
             ) {
@@ -309,8 +322,7 @@ impl CcBsSubentity {
                         );
                         let call_id = self.circuits.get_next_call_id();
                         let sdu = Self::build_d_release(call_id, DisconnectCause::CongestionInInfrastructure);
-                        let msg =
-                            Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+                        let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
                         queue.push_back(msg);
                         return;
                     }
@@ -330,6 +342,12 @@ impl CcBsSubentity {
         } else {
             (calling_ts, calling_usage)
         };
+        let tpi_call_type = if pdu.simplex_duplex_selection {
+            TpiCallType::IndividualFullDuplex
+        } else {
+            TpiCallType::IndividualHalfDuplex
+        };
+        self.tpi_start_context(call_id, tpi_call_type, calling_party.ssi, pdu.clir_control != 0);
 
         tracing::info!(
             "rx_u_setup_p2p: call from ISSI {} to ISSI {} -> call_id={} ts(call)={} usage(call)={} ts(called)={} usage(called)={}",
@@ -367,7 +385,7 @@ impl CcBsSubentity {
             calling_party_address_ssi: Some(calling_party.ssi),
             calling_party_extension: None,
             external_subscriber_number: None,
-            facility: None,
+            facility: self.tpi_inform_for_call(call_id),
             dm_ms_address: None,
             proprietary: None,
         };
@@ -379,6 +397,7 @@ impl CcBsSubentity {
                 pdu: d_setup,
                 dest_addr: called_addr,
                 resend: true,
+                last_reporter: None,
                 is_individual: true,
             },
         );
@@ -444,8 +463,9 @@ impl CcBsSubentity {
         called_addr: TetraAddress,
     ) {
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
         let mut network_call = Self::build_network_circuit_call_from_u_setup(pdu, calling_party.ssi);
 
         // Short service numbers (< 1_000_000) must be sent to TetraPack
@@ -521,8 +541,7 @@ impl CcBsSubentity {
             // Only override if the number field is non-empty and destination is not a
             // short service number (< 1_000_000). Short numbers like 600, 000 etc. are
             // service codes on TetraPack and must be forwarded as-is via the number field.
-            let number_is_service_code = !network_call.number.is_empty()
-                && network_call.number.chars().all(|c| c.is_ascii_digit());
+            let number_is_service_code = !network_call.number.is_empty() && network_call.number.chars().all(|c| c.is_ascii_digit());
             if !number_is_service_code {
                 tracing::debug!(
                     "CMCE: overriding non-routable destination SSI {} with 0 for external-number call src={} number='{}'",
@@ -544,7 +563,10 @@ impl CcBsSubentity {
         // Allocate one bearer for the local MS.
         let circuit_calling = {
             let mut state = self.config.state_write();
-            match self.circuits.allocate_circuit_with_allocator_duplex(Direction::Both, pdu.basic_service_information.communication_type, pdu.simplex_duplex_selection,
+            match self.circuits.allocate_circuit_with_allocator_duplex(
+                Direction::Both,
+                pdu.basic_service_information.communication_type,
+                pdu.simplex_duplex_selection,
                 &mut state.timeslot_alloc,
                 TimeslotOwner::Cmce,
             ) {
@@ -569,6 +591,12 @@ impl CcBsSubentity {
         let ts = circuit_calling.ts;
         let usage = circuit_calling.usage;
         let brew_uuid = uuid::Uuid::new_v4();
+        let tpi_call_type = if pdu.simplex_duplex_selection {
+            TpiCallType::IndividualFullDuplex
+        } else {
+            TpiCallType::IndividualHalfDuplex
+        };
+        self.tpi_start_context(call_id, tpi_call_type, calling_party.ssi, pdu.clir_control != 0);
 
         tracing::info!(
             "CMCE: forwarding U-SETUP over Brew call_id={} src={} dst={} ts={} duplex={} number='{}' uuid={}",
@@ -648,7 +676,8 @@ impl CcBsSubentity {
         use tetra_saps::control::call_control::CircuitDlMediaSource;
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-            tracing::error!("BUG: unexpected message in fsm_on_u_setup_echo"); return;
+            tracing::error!("BUG: unexpected message in fsm_on_u_setup_echo");
+            return;
         };
 
         // Reject if another echo call is already active
@@ -685,10 +714,13 @@ impl CcBsSubentity {
         let call_id = circuit.call_id;
         let ts = circuit.ts;
         let usage = circuit.usage;
+        self.tpi_start_context(call_id, TpiCallType::IndividualFullDuplex, calling_party.ssi, pdu.clir_control != 0);
 
         tracing::info!(
             "CMCE: echo service answering call_id={} src={} ts={}",
-            call_id, calling_party.ssi, ts
+            call_id,
+            calling_party.ssi,
+            ts
         );
 
         // Open UMAC circuit — LocalLoopback so UL frames are echoed back as DL
@@ -711,7 +743,7 @@ impl CcBsSubentity {
                 basic_service_information: None,
                 temporary_address: None,
                 notification_indicator: None,
-                facility: None,
+                facility: self.tpi_inform_for_call(call_id),
                 proprietary: None,
             };
             tracing::info!("CMCE: echo service -> {:?}", d_connect);
@@ -753,35 +785,35 @@ impl CcBsSubentity {
         self.echo_session = Some(crate::cmce::subentities::cc_bs::echo::EchoSession::new(ts, call_id));
 
         // Register individual call directly (bypass create FSM which only accepts Pending states)
-        self.individual_calls.insert(call_id, IndividualCall {
-            calling_addr: calling_party,
-            called_addr: TetraAddress::new(
-                crate::cmce::subentities::cc_bs::echo::ECHO_ISSI,
-                tetra_core::SsiType::Issi
-            ),
-            calling_handle: prim.handle,
-            calling_link_id: prim.link_id,
-            calling_endpoint_id: prim.endpoint_id,
-            called_handle: None,
-            called_link_id: None,
-            called_endpoint_id: None,
-            calling_ts: ts,
-            called_ts: ts,
-            calling_usage: usage,
-            called_usage: usage,
-            simplex_duplex: pdu.simplex_duplex_selection,
-            state: crate::cmce::subentities::cc_bs::call::IndividualCallState::Active,
-            setup_timer_started: None,
-            setup_timeout: None,
-            active_timer_started: Some(self.dltime),
-            call_timeout: self.config_call_timeout(),
-            called_over_brew: false,
-            calling_over_brew: false,
-            brew_uuid: None,
-            network_call: None,
-            connect_request_sent: false,
-            floor_holder: Some(calling_party.ssi),
-        });
+        self.individual_calls.insert(
+            call_id,
+            IndividualCall {
+                calling_addr: calling_party,
+                called_addr: TetraAddress::new(crate::cmce::subentities::cc_bs::echo::ECHO_ISSI, tetra_core::SsiType::Issi),
+                calling_handle: prim.handle,
+                calling_link_id: prim.link_id,
+                calling_endpoint_id: prim.endpoint_id,
+                called_handle: None,
+                called_link_id: None,
+                called_endpoint_id: None,
+                calling_ts: ts,
+                called_ts: ts,
+                calling_usage: usage,
+                called_usage: usage,
+                simplex_duplex: pdu.simplex_duplex_selection,
+                state: crate::cmce::subentities::cc_bs::call::IndividualCallState::Active,
+                setup_timer_started: None,
+                setup_timeout: None,
+                active_timer_started: Some(self.dltime),
+                call_timeout: self.config_call_timeout(),
+                called_over_brew: false,
+                calling_over_brew: false,
+                brew_uuid: None,
+                network_call: None,
+                connect_request_sent: false,
+                floor_holder: Some(calling_party.ssi),
+            },
+        );
 
         // Notify UMAC that the floor is granted — this resets the UL inactivity timer
         // so the circuit stays alive while the caller is talking.
@@ -797,5 +829,4 @@ impl CcBsSubentity {
             }),
         });
     }
-
 }
