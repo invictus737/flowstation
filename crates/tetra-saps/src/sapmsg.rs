@@ -80,6 +80,14 @@ pub enum SapMsgInner {
     // MM -> Brew/CMCE subscriber update
     MmSubscriberUpdate(MmSubscriberUpdate),
 
+    /// Internal CMCE/MM request to make a terminal refresh its LU/GSSI state.
+    /// This sends D-LOCATION-UPDATE-COMMAND over the air only; it is not a
+    /// subscriber deregistration and must not be forwarded to Brew.
+    MmForceLocationUpdate {
+        issi: u32,
+        handle: u32,
+    },
+
     /// Sent by UMAC to MM when a UL burst is received from a known MS.
     /// MM stores the RSSI value per MS for logging and future handover decisions.
     MsRssiUpdate {
@@ -134,6 +142,9 @@ impl Display for SapMsgInner {
 
             // Control/Brew
             SapMsgInner::MmSubscriberUpdate(_) => write!(f, "MmSubscriberUpdate"),
+            SapMsgInner::MmForceLocationUpdate { issi, handle } => {
+                write!(f, "MmForceLocationUpdate(issi={}, handle={})", issi, handle)
+            }
             SapMsgInner::MsRssiUpdate { issi, rssi_dbfs } => write!(f, "MsRssiUpdate(issi={}, rssi={:.1}dBFS)", issi, rssi_dbfs),
             SapMsgInner::MmEnergySavingUpdate { issi, mode, start_time } => {
                 write!(f, "MmEnergySavingUpdate(issi={}, mode={}, start={:?})", issi, mode, start_time)

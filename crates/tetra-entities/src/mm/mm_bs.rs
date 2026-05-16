@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::net_control::ControlEndpoint;
 use crate::net_telemetry::channel::TelemetrySink;
 use crate::{MessageQueue, TetraEntityTrait, net_brew};
@@ -38,6 +40,7 @@ pub struct MmBs {
     control: Option<ControlEndpoint>,
     client_mgr: MmClientMgr,
     current_dl_time: TdmaTime,
+    forced_location_updates: HashSet<u32>,
 }
 
 impl MmBs {
@@ -49,6 +52,7 @@ impl MmBs {
             control,
             client_mgr,
             current_dl_time: TdmaTime::default(),
+            forced_location_updates: HashSet::new(),
         }
     }
 
@@ -291,6 +295,7 @@ impl MmBs {
         // Try to register the client
         let issi = prim.received_address.ssi;
         let handle = prim.handle;
+        let was_forced_location_update = self.forced_location_updates.remove(&issi);
 
         // ISSI whitelist check — reject if whitelist is non-empty and ISSI not in it
         if !self.config.config().security.is_issi_allowed(issi) {
@@ -499,7 +504,7 @@ impl MmBs {
         // again, creating an infinite registration loop.
         let is_roaming = pdu.location_update_type == LocationUpdateType::RoamingLocationUpdating
             || pdu.location_update_type == LocationUpdateType::ServiceRestorationRoamingLocationUpdating;
-        if is_new && !is_roaming {
+        if is_new && !is_roaming && !was_forced_location_update {
             tracing::info!("Sending D-LOCATION UPDATE COMMAND to MS {} to prompt TEI and group report", issi);
             Self::send_d_location_update_command(queue, issi, handle);
         }
@@ -1289,6 +1294,15 @@ impl TetraEntityTrait for MmBs {
                 match message.msg {
                     SapMsgInner::BrewReconnected => {
                         self.rx_brew_reconnected(queue);
+                    }
+                    SapMsgInner::MmForceLocationUpdate { issi, handle } => {
+                        tracing::info!(
+                            "MM: forcing location update for ISSI {} from CMCE request (handle={})",
+                            issi,
+                            handle
+                        );
+                        self.forced_location_updates.insert(issi);
+                        Self::send_d_location_update_command(queue, issi, handle);
                     }
                     SapMsgInner::MsRssiUpdate { issi, rssi_dbfs } => {
                         self.client_mgr.update_client_rssi(issi, rssi_dbfs);
