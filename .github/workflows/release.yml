@@ -21,6 +21,11 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.92.0
 
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libsoapysdr-dev
+
       - name: Install cross
         run: cargo install cross --locked --version 0.2.5
 
