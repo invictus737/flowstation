@@ -159,6 +159,13 @@ impl CcBsSubentity {
         );
         self.send_d_tx_granted_facch(queue, call_id, requesting_party.ssi, dest_addr.ssi, ts);
 
+        // Notify dashboard that the speaker changed (hangtime -> new speaker).
+        self.emit(crate::net_telemetry::TelemetryEvent::GroupCallSpeakerChanged {
+            call_id,
+            gssi: dest_ssi,
+            speaker_issi: requesting_party.ssi,
+        });
+
         queue.push_back(SapMsg {
             sap: Sap::Control,
             src: TetraEntity::Cmce,
@@ -229,6 +236,13 @@ impl CcBsSubentity {
             self.tpi_update_talker(call_id, requester.ssi);
             self.fsm_send_d_tx_granted_individual(queue, call_id, requester, ts, TransmissionGrant::Granted, Some(requester.ssi));
             self.send_d_tx_granted_facch(queue, call_id, requester.ssi, dest_addr.ssi, ts);
+
+            // Notify dashboard that the queued speaker got the floor.
+            self.emit(crate::net_telemetry::TelemetryEvent::GroupCallSpeakerChanged {
+                call_id,
+                gssi: dest_ssi,
+                speaker_issi: requester.ssi,
+            });
 
             queue.push_back(SapMsg {
                 sap: Sap::Control,

@@ -91,7 +91,7 @@ impl CcBsSubentity {
         // 2) D-CONNECT to caller.
         let d_connect = DConnect {
             call_identifier: circuit.call_id,
-            call_time_out: self.config_call_timeout(),
+            call_time_out: if pdu.simplex_duplex_selection { CallTimeout::Infinite } else { self.config_call_timeout() },
             hook_method_selection: pdu.hook_method_selection,
             simplex_duplex_selection: pdu.simplex_duplex_selection,
             transmission_grant: TransmissionGrant::Granted,
@@ -140,7 +140,7 @@ impl CcBsSubentity {
         // 3) D-SETUP to group.
         let d_setup = DSetup {
             call_identifier: circuit.call_id,
-            call_time_out: self.config_call_timeout(),
+            call_time_out: if pdu.simplex_duplex_selection { CallTimeout::Infinite } else { self.config_call_timeout() },
             hook_method_selection: pdu.hook_method_selection,
             simplex_duplex_selection: pdu.simplex_duplex_selection,
             basic_service_information: pdu.basic_service_information.clone(),
@@ -373,7 +373,7 @@ impl CcBsSubentity {
 
         let d_setup = DSetup {
             call_identifier: call_id,
-            call_time_out: self.config_call_timeout(),
+            call_time_out: if pdu.simplex_duplex_selection { CallTimeout::Infinite } else { self.config_call_timeout() },
             hook_method_selection: pdu.hook_method_selection,
             simplex_duplex_selection: pdu.simplex_duplex_selection,
             basic_service_information: pdu.basic_service_information.clone(),
@@ -733,7 +733,7 @@ impl CcBsSubentity {
         {
             let d_connect = DConnect {
                 call_identifier: call_id,
-                call_time_out: self.config_call_timeout(),
+                call_time_out: if pdu.simplex_duplex_selection { CallTimeout::Infinite } else { self.config_call_timeout() },
                 hook_method_selection: pdu.hook_method_selection,
                 simplex_duplex_selection: pdu.simplex_duplex_selection,
                 transmission_grant: TransmissionGrant::Granted,

@@ -66,13 +66,7 @@ impl MleBroadcast {
     fn send_d_nwrk_broadcast(&self, queue: &mut MessageQueue) {
         // Timezone is validated at config parse time, so encode cannot fail here
         let tz = self.time_broadcast.as_deref().unwrap();
-        let time_value = match network_time::encode_tetra_network_time(tz) {
-            Some(v) => v,
-            None => {
-                tracing::warn!("D-NWRK-BROADCAST: failed to encode network time for tz='{}', skipping", tz);
-                return;
-            }
-        };
+        let time_value = network_time::encode_tetra_network_time(tz).unwrap();
 
         // Build neighbor cell list from config
         let cfg = self.config.config();

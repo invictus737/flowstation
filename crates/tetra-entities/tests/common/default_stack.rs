@@ -72,6 +72,7 @@ pub fn default_cell_info(freq_info: FreqInfo) -> CfgCellInfo {
         ms_txpwr_max_cell: 4,
         local_ssi_ranges: SortedDisjointSsiRanges::from_vec_ssirange(vec![]),
         timezone: None,
+        home_mode_display: None,
         neighbor_cells_ca: vec![],
         hangtime_secs: 5,
         call_timeout_secs: 120,

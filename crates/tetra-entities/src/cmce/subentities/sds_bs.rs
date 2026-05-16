@@ -1,6 +1,6 @@
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::Layer2Service;
-use tetra_core::{BitBuffer, Sap, SsiType, TetraAddress, tetra_entities::TetraEntity, unimplemented_log};
+use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, tetra_entities::TetraEntity, unimplemented_log};
 use tetra_pdus::cmce::enums::pre_coded_status::PreCodedStatus;
 use tetra_pdus::cmce::enums::short_report_type::ShortReportType;
 use tetra_saps::control::enums::sds_user_data::SdsUserData;
@@ -14,18 +14,43 @@ use tetra_pdus::cmce::pdus::d_status::DStatus;
 use tetra_pdus::cmce::pdus::u_sds_data::USdsData;
 use tetra_pdus::cmce::pdus::u_status::UStatus;
 
+use super::home_mode_display::HomeModeDisplaySender;
 use crate::MessageQueue;
 use crate::net_brew;
 use crate::net_control::ControlCommand;
+use crate::net_telemetry::{TelemetryEvent, TelemetrySink};
 
 /// Clause 13 Short Data Service CMCE sub-entity
 pub struct SdsBsSubentity {
     config: SharedConfig,
+    telemetry: Option<TelemetrySink>,
+    home_mode_display_sender: HomeModeDisplaySender,
 }
 
 impl SdsBsSubentity {
     pub fn new(config: SharedConfig) -> Self {
-        SdsBsSubentity { config }
+        SdsBsSubentity {
+            config,
+            telemetry: None,
+            home_mode_display_sender: HomeModeDisplaySender::new(),
+        }
+    }
+
+    pub fn set_telemetry(&mut self, sink: TelemetrySink) {
+        self.telemetry = Some(sink);
+    }
+
+    fn emit(&self, event: TelemetryEvent) {
+        if let Some(sink) = &self.telemetry {
+            sink.send(event);
+        }
+    }
+
+    /// Called every tick from CmceBs::tick_start. Fires Home Mode Display broadcast when due.
+    pub fn tick_start(&mut self, queue: &mut MessageQueue, dltime: TdmaTime) {
+        if let Some(hmd_tx) = self.home_mode_display_sender.tick_start(&self.config, dltime) {
+            self.send_d_sds_data(queue, hmd_tx.source_issi, hmd_tx.dest_gssi, SsiType::Gssi, hmd_tx.payload);
+        }
     }
 
     /// Handle incoming U-SDS-DATA from a local MS (via RF uplink)
@@ -81,9 +106,11 @@ impl SdsBsSubentity {
         if is_local_issi {
             tracing::info!("SDS: local delivery: {} -> {}", source_ssi, dest_ssi);
             self.send_d_sds_data(queue, source_ssi, dest_ssi, SsiType::Issi, pdu.user_defined_data);
+            self.emit(TelemetryEvent::SdsActivity { source_issi: source_ssi, dest_issi: dest_ssi });
         } else if is_local_group {
             tracing::info!("SDS: group delivery: {} -> GSSI {}", source_ssi, dest_ssi);
             self.send_d_sds_data(queue, source_ssi, dest_ssi, SsiType::Gssi, pdu.user_defined_data);
+            self.emit(TelemetryEvent::SdsActivity { source_issi: source_ssi, dest_issi: dest_ssi });
         } else if net_brew::feature_sds_enabled(&self.config) {
             tracing::info!("SDS: forwarding to Brew: {} -> {}", source_ssi, dest_ssi);
             queue.push_back(SapMsg {
