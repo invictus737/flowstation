@@ -40,13 +40,12 @@ impl DNwrkBroadcast {
         let cell_load_ca = buffer.read_field(2, "cell_load_ca")? as u8;
 
         // obit designates presence of any further type2, type3 or type4 fields
-        let mut obit = delimiters::read_obit(buffer)?;
+        let obit = delimiters::read_obit(buffer)?;
 
         // Type2
         let tetra_network_time = typed::parse_type2_generic(obit, buffer, 48, "tetra_network_time")?;
         // Type2
-        let number_of_ca_neighbour_cells =
-            typed::parse_type2_generic(obit, buffer, 3, "number_of_ca_neighbour_cells")?.map(|v| v as u8);
+        let number_of_ca_neighbour_cells = typed::parse_type2_generic(obit, buffer, 3, "number_of_ca_neighbour_cells")?.map(|v| v as u8);
 
         // Conditional: parse neighbour cell info elements
         let mut neighbour_cell_information_for_ca = Vec::new();
@@ -60,12 +59,6 @@ impl DNwrkBroadcast {
             for _ in 0..count {
                 neighbour_cell_information_for_ca.push(NeighbourCellInformationForCa::from_bitbuf(buffer)?);
             }
-        }
-
-        // Read trailing obit (if not previously encountered)
-        obit = if obit { buffer.read_field(1, "trailing_obit")? == 1 } else { obit };
-        if obit {
-            return Err(PduParseErr::InvalidTrailingMbitValue);
         }
 
         Ok(DNwrkBroadcast {
@@ -120,12 +113,7 @@ impl DNwrkBroadcast {
         typed::write_type2_generic(obit, buffer, self.tetra_network_time, 48);
 
         // Type2
-        typed::write_type2_generic(
-            obit,
-            buffer,
-            self.number_of_ca_neighbour_cells.map(|v| v as u64),
-            3,
-        );
+        typed::write_type2_generic(obit, buffer, self.number_of_ca_neighbour_cells.map(|v| v as u64), 3);
 
         // Conditional: write neighbour cell info elements (no P-bit per note 3)
         if self.number_of_ca_neighbour_cells.unwrap_or(0) > 0 {
@@ -133,11 +121,6 @@ impl DNwrkBroadcast {
                 neighbour.to_bitbuf(buffer)?;
             }
         }
-
-        // Write trailing obit=0 to signal end of optional fields.
-        // from_bitbuf reads this bit; without it the MS reads a random bit from the
-        // next PDU/padding and may interpret it as the start of another neighbour element.
-        delimiters::write_obit(buffer, 0);
 
         Ok(())
     }
@@ -154,5 +137,31 @@ impl fmt::Display for DNwrkBroadcast {
             self.number_of_ca_neighbour_cells,
             self.neighbour_cell_information_for_ca,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_neighbour_network_time_wire_format_matches_legacy_bs() {
+        let pdu = DNwrkBroadcast {
+            cell_re_select_parameters: 0,
+            cell_load_ca: 0,
+            tetra_network_time: Some(0x59747318D7FF),
+            number_of_ca_neighbour_cells: Some(0),
+            neighbour_cell_information_for_ca: Vec::new(),
+        };
+
+        let mut buf = BitBuffer::new_autoexpand(128);
+        pdu.to_bitbuf(&mut buf).expect("serialize");
+        assert_eq!(buf.get_pos(), 75);
+
+        buf.seek(0);
+        let parsed = DNwrkBroadcast::from_bitbuf(&mut buf).expect("parse");
+        assert_eq!(parsed.tetra_network_time, pdu.tetra_network_time);
+        assert_eq!(parsed.number_of_ca_neighbour_cells, Some(0));
+        assert!(parsed.neighbour_cell_information_for_ca.is_empty());
     }
 }
