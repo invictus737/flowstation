@@ -112,6 +112,26 @@ impl MmBs {
         });
     }
 
+    fn stored_energy_saving_start_time(&mut self, issi: u32) -> Option<TdmaTime> {
+        let (frame, multiframe) = {
+            let client = self.client_mgr.get_client_by_issi(issi)?;
+            (client.monitoring_frame?, client.monitoring_multiframe?)
+        };
+        let mut start = TdmaTime {
+            h: self.current_dl_time.h,
+            m: multiframe,
+            f: frame,
+            t: 1,
+        };
+        if !start.is_valid() {
+            return None;
+        }
+        if start.diff(self.current_dl_time) > 0 {
+            start = start.add_timeslots(-(60 * 18 * 4));
+        }
+        Some(start)
+    }
+
     fn emit_subscriber_update(&self, queue: &mut MessageQueue, issi: u32, groups: Vec<u32>, action: BrewSubscriberAction) {
         // If brew is active, forward subscriber updates to the Brew entity.
         // Register/Deregister must always be sent for brew-routable ISSIs,
@@ -342,10 +362,18 @@ impl MmBs {
         }
         if needs_brew_register {
             if !is_new {
-                tracing::info!(
-                    "MM: ISSI {} re-attaching via ItsiAttach (returned from another network) — re-registering in Brew",
-                    issi
-                );
+                if is_itsi_attach {
+                    tracing::info!(
+                        "MM: ISSI {} re-attaching via ItsiAttach (returned from another network) — re-registering in Brew",
+                        issi
+                    );
+                } else if was_pending {
+                    tracing::info!(
+                        "MM: ISSI {} completed T351 re-registration — restoring local subscriber state",
+                        issi
+                    );
+                }
+                self.config.state_write().subscribers.register(issi);
             }
             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
         }
@@ -420,18 +448,9 @@ impl MmBs {
         // Reset periodic registration timer on every successful registration.
         self.client_mgr.reset_registration_timer(issi);
 
-        // Use PeriodicLocationUpdating accept type when periodic registration is enabled.
-        // This signals to the MS that it must re-register within the configured interval.
-        let periodic_secs = self.config.config().cell.periodic_registration_secs;
-        let accept_type = if periodic_secs > 0 {
-            LocationUpdateType::PeriodicLocationUpdating
-        } else {
-            pdu.location_update_type
-        };
-
         // Build D-LOCATION UPDATE ACCEPT pdu
         let pdu_response = DLocationUpdateAccept {
-            location_update_accept_type: accept_type,
+            location_update_accept_type: pdu.location_update_type,
             ssi: Some(issi as u64),
             address_extension: None,
             subscriber_class: None,
@@ -559,8 +578,17 @@ impl MmBs {
                 tracing::info!("MS {} energy saving mode change response: {:?}", issi, esm);
                 if esm == EnergySavingMode::StayAlive {
                     self.store_and_emit_energy_saving(queue, issi, None, None);
-                } else if let Err(e) = self.client_mgr.set_client_energy_saving_mode(issi, esm) {
-                    tracing::warn!("MM: failed updating energy-saving response for MS {}: {:?}", issi, e);
+                } else {
+                    let start_time = self.stored_energy_saving_start_time(issi).or_else(|| {
+                        let (_, start_time) = self.allocate_energy_saving_information(esm);
+                        start_time
+                    });
+                    let esi = EnergySavingInformation {
+                        energy_saving_mode: esm,
+                        frame_number: start_time.map(|t| t.f),
+                        multiframe_number: start_time.map(|t| t.m),
+                    };
+                    self.store_and_emit_energy_saving(queue, issi, Some(&esi), start_time);
                 }
                 handled = true;
             }
@@ -1219,6 +1247,7 @@ impl TetraEntityTrait for MmBs {
                         self.emit_subscriber_update(queue, issi, groups, BrewSubscriberAction::Deaffiliate);
                     }
                     self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
+                    self.store_and_emit_energy_saving(queue, issi, None, None);
                 }
                 continue;
             }
@@ -1300,6 +1329,7 @@ impl TetraEntityTrait for MmBs {
                             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
                             self.client_mgr.remove_client(issi);
                             self.config.state_write().subscribers.deregister(issi);
+                            self.store_and_emit_energy_saving(queue, issi, None, None);
                         }
                     }
                     _ => {

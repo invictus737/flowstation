@@ -1,7 +1,7 @@
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::freqs::FreqInfo;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, Todo, unimplemented_log};
+use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, TdmaTime, TetraAddress, Todo, unimplemented_log};
 use tetra_pdus::mle::fields::bs_service_details::BsServiceDetails;
 use tetra_pdus::mle::pdus::d_mle_sync::DMleSync;
 use tetra_pdus::mle::pdus::d_mle_sysinfo::DMleSysinfo;
@@ -1157,12 +1157,11 @@ impl UmacBs {
 
                     let usage_marker = prim.chan_alloc.as_ref().and_then(|ca| ca.usage);
                     let has_pending_ra = self.channel_scheduler.take_pending_ra_ack(ts, prim.main_address.ssi);
-                    let is_random_access_response = has_pending_ra || prim.main_address.ssi_type == SsiType::Issi;
                     let mut mac_pdu = MacResource {
                         fill_bits: false,
                         pos_of_grant: 0,
                         encryption_mode: 0,
-                        random_access_flag: is_random_access_response,
+                        random_access_flag: has_pending_ra,
                         length_ind: 0,
                         addr: Some(prim.main_address),
                         event_label: None,
@@ -1207,16 +1206,15 @@ impl UmacBs {
             (None, None)
         };
 
-        // Build MAC-RESOURCE optimistically (as if it would always fit in one slot)
-        // random_access_flag: true for SSI-addressed (responses to random access requests),
-        // false for GSSI-addressed (unsolicited group signaling like D-SETUP).
-        // A radio will reject a random-access-flagged message if it didn't initiate one.
-        let is_random_access_response = prim.main_address.ssi_type != SsiType::Gssi;
+        // Build MAC-RESOURCE optimistically (as if it would always fit in one slot).
+        // The random_access_flag is integrated later only when a matching MAC-ACCESS
+        // acknowledgement or grant is queued for this SSI. Plain ISSI-addressed
+        // signalling must not bypass energy-saving scheduling.
         let mut pdu = MacResource {
             fill_bits: false, // Updated later
             pos_of_grant: 0,
             encryption_mode: 0,
-            random_access_flag: is_random_access_response,
+            random_access_flag: false,
             length_ind: 0, // Updated later
             addr: Some(prim.main_address),
             event_label: None,

@@ -4,8 +4,8 @@ use tetra_core::freqs::FreqInfo;
 
 use crate::bluestation::{CfgCellInfo, CfgControl, CfgIdentity, CfgNetInfo, CfgPhyIo, CfgSecurity, PhyBackend, StackState};
 
-use super::sec_dashboard::CfgDashboard;
 use super::sec_brew::CfgBrew;
+use super::sec_dashboard::CfgDashboard;
 use super::sec_telemetry::CfgTelemetry;
 
 /// Wrapper for a string that should be treated as a secret. Display and Debug will redact the actual value,
@@ -132,6 +132,9 @@ impl StackConfig {
         if self.cell.ms_txpwr_max_cell > 7 {
             return Err("ms_txpwr_max_cell must be 0-7 (3 bits)");
         }
+        if self.cell.neighbor_cell_broadcast > 2 {
+            return Err("cell.neighbor_cell_broadcast must be 0, 1 or 2 (3 is reserved)");
+        }
 
         // Validate timezone if configured
         if let Some(ref tz) = self.cell.timezone {
@@ -173,28 +176,44 @@ impl StackConfig {
                 return Err("cell.neighbor_cells_ca: main_carrier_number must be 0-4095");
             }
             if let Some(v) = cell.main_carrier_number_extension {
-                if v > 0x3FF { return Err("cell.neighbor_cells_ca: main_carrier_number_extension must be 0-1023"); }
+                if v > 0x3FF {
+                    return Err("cell.neighbor_cells_ca: main_carrier_number_extension must be 0-1023");
+                }
             }
             if let Some(v) = cell.mcc {
-                if v > 0x3FF { return Err("cell.neighbor_cells_ca: mcc must be 0-1023"); }
+                if v > 0x3FF {
+                    return Err("cell.neighbor_cells_ca: mcc must be 0-1023");
+                }
             }
             if let Some(v) = cell.mnc {
-                if v > 0x3FFF { return Err("cell.neighbor_cells_ca: mnc must be 0-16383"); }
+                if v > 0x3FFF {
+                    return Err("cell.neighbor_cells_ca: mnc must be 0-16383");
+                }
             }
             if let Some(v) = cell.location_area {
-                if v > 0x3FFF { return Err("cell.neighbor_cells_ca: location_area must be 0-16383"); }
+                if v > 0x3FFF {
+                    return Err("cell.neighbor_cells_ca: location_area must be 0-16383");
+                }
             }
             if let Some(v) = cell.maximum_ms_transmit_power {
-                if v > 0x7 { return Err("cell.neighbor_cells_ca: maximum_ms_transmit_power must be 0-7"); }
+                if v > 0x7 {
+                    return Err("cell.neighbor_cells_ca: maximum_ms_transmit_power must be 0-7");
+                }
             }
             if let Some(v) = cell.minimum_rx_access_level {
-                if v > 0xF { return Err("cell.neighbor_cells_ca: minimum_rx_access_level must be 0-15"); }
+                if v > 0xF {
+                    return Err("cell.neighbor_cells_ca: minimum_rx_access_level must be 0-15");
+                }
             }
             if let Some(v) = cell.timeshare_cell_information_or_security_parameters {
-                if v > 0x1F { return Err("cell.neighbor_cells_ca: timeshare_cell_information_or_security_parameters must be 0-31"); }
+                if v > 0x1F {
+                    return Err("cell.neighbor_cells_ca: timeshare_cell_information_or_security_parameters must be 0-31");
+                }
             }
             if let Some(v) = cell.tdma_frame_offset {
-                if v > 0x3F { return Err("cell.neighbor_cells_ca: tdma_frame_offset must be 0-63"); }
+                if v > 0x3F {
+                    return Err("cell.neighbor_cells_ca: tdma_frame_offset must be 0-63");
+                }
             }
         }
 

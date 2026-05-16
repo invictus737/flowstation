@@ -594,7 +594,10 @@ function setTheme(theme,btn){
 })();
 
 let ws=null,state={ms:{},calls:{},lastHeard:[],brewOnline:false},sdsDest=0;
+const dashboardToken=new URLSearchParams(location.search).get('token')||localStorage.getItem('flowstation_dashboard_token')||'';
+if(dashboardToken)localStorage.setItem('flowstation_dashboard_token',dashboardToken);
 const logFilter=()=>document.getElementById('log-filter').value;
+const authHeaders=()=>dashboardToken?{'X-Dashboard-Token':dashboardToken}:{};
 
 function setBrewStatus(online){
   state.brewOnline=online;
@@ -621,7 +624,8 @@ function showPage(name,btn){
 
 function connect(){
   const proto=location.protocol==='https:'?'wss:':'ws:';
-  ws=new WebSocket(`${proto}//${location.host}/ws`);
+  const qs=dashboardToken?`?token=${encodeURIComponent(dashboardToken)}`:'';
+  ws=new WebSocket(`${proto}//${location.host}/ws${qs}`);
   ws.onopen=()=>{
     document.getElementById('statusDot').classList.add('online');
     document.getElementById('statusText').textContent=t('online');
@@ -799,11 +803,11 @@ function clearLog(){document.getElementById('log-container').innerHTML='';}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 async function loadConfig(){
-  try{const r=await fetch('/api/config');if(r.ok)document.getElementById('config-editor').value=await r.text();else setConfigMsg(t('conn_error'),false);}
+  try{const r=await fetch('/api/config',{headers:authHeaders()});if(r.ok)document.getElementById('config-editor').value=await r.text();else setConfigMsg(t('conn_error'),false);}
   catch{setConfigMsg(t('conn_error'),false);}
 }
 async function saveConfig(){
-  try{const r=await fetch('/api/config',{method:'POST',body:document.getElementById('config-editor').value});if(r.ok)setConfigMsg(t('saved'),true);else setConfigMsg(t('save_fail')+': '+await r.text(),false);}
+  try{const r=await fetch('/api/config',{method:'POST',headers:authHeaders(),body:document.getElementById('config-editor').value});if(r.ok)setConfigMsg(t('saved'),true);else setConfigMsg(t('save_fail')+': '+await r.text(),false);}
   catch(e){setConfigMsg(t('conn_error'),false);}
 }
 function setConfigMsg(txt,ok){const el=document.getElementById('config-msg');el.textContent=txt;el.style.color=ok?'var(--accent)':'var(--danger)';}

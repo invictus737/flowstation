@@ -19,16 +19,13 @@ pub enum BroadcastType {
 pub struct MleBroadcast {
     config: SharedConfig,
     last_broadcast_type: BroadcastType,
-    time_broadcast: Option<String>,
 }
 
 impl MleBroadcast {
     pub fn new(config: SharedConfig) -> Self {
-        let time_broadcast = config.config().cell.timezone.clone();
         Self {
             config,
             last_broadcast_type: BroadcastType::None,
-            time_broadcast,
         }
     }
 
@@ -51,7 +48,8 @@ impl MleBroadcast {
     fn determine_next_broadcast_type(&self) -> BroadcastType {
         match self.last_broadcast_type {
             BroadcastType::None => {
-                if self.time_broadcast.is_some() {
+                let cfg = self.config.config();
+                if cfg.cell.timezone.is_some() || !cfg.cell.neighbor_cells_ca.is_empty() {
                     BroadcastType::NetworkTime
                 } else {
                     BroadcastType::None
@@ -62,12 +60,9 @@ impl MleBroadcast {
     }
 
     fn send_d_nwrk_broadcast(&self, queue: &mut MessageQueue) {
-        // Timezone is validated at config parse time, so encode cannot fail here
-        let tz = self.time_broadcast.as_deref().unwrap();
-        let time_value = network_time::encode_tetra_network_time(tz).unwrap();
-
         // Build neighbor cell list from config
         let cfg = self.config.config();
+        let time_value = cfg.cell.timezone.as_deref().and_then(network_time::encode_tetra_network_time);
         let neighbour_cells: Vec<NeighbourCellInformationForCa> = cfg
             .cell
             .neighbor_cells_ca
@@ -96,7 +91,7 @@ impl MleBroadcast {
         let pdu = DNwrkBroadcast {
             cell_re_select_parameters: 0,
             cell_load_ca: 0,
-            tetra_network_time: Some(time_value),
+            tetra_network_time: time_value,
             // Keep the zero-neighbour wire format compatible with the stable
             // Bluestation 0.5.9 baseline used by field terminals.
             number_of_ca_neighbour_cells: Some(neighbour_count),
@@ -146,8 +141,8 @@ impl MleBroadcast {
         queue.push_back(sapmsg);
         tracing::info!(
             "D-NWRK-BROADCAST sent (tz={}, time=0x{:012X}, neighbours={})",
-            tz,
-            time_value,
+            cfg.cell.timezone.as_deref().unwrap_or("none"),
+            time_value.unwrap_or(0),
             neighbour_count
         );
     }

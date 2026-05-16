@@ -225,7 +225,12 @@ fn main() {
 
         if has_dashboard {
             let dash_cfg = cfg.config().dashboard.clone().unwrap();
-            let mut dashboard = DashboardServer::new(args.config.clone());
+            let mut dashboard = DashboardServer::new(
+                args.config.clone(),
+                dash_cfg.allow_config_api,
+                dash_cfg.allow_control_commands,
+                dash_cfg.auth_token.as_ref().map(|token| token.as_ref().to_string()),
+            );
 
             // Create a control link so dashboard can send commands to CMCE
             let dash_cmd_tx = {
@@ -247,41 +252,54 @@ fn main() {
             // Forward log entries to dashboard
             if let Some(log_rx) = dashboard_log_rx {
                 let dash_log = std::sync::Arc::clone(&dashboard);
-                thread::Builder::new().name("dashboard-log".into()).spawn(move || {
-                    while let Ok((level, msg)) = log_rx.recv() {
-                        // Filter out debug/trace noise from dashboard log tab
-                        if level == "DEBUG" || level == "TRACE" { continue; }
-                        // Filter out TDMA tick noise — thousands per second
-                        if msg.contains("tick dl") || msg.contains("tick ul") || msg.starts_with("--- tick") { continue; }
-                        dash_log.push_log(&level, msg);
-                    }
-                }).expect("failed to spawn dashboard-log thread");
+                thread::Builder::new()
+                    .name("dashboard-log".into())
+                    .spawn(move || {
+                        while let Ok((level, msg)) = log_rx.recv() {
+                            // Filter out debug/trace noise from dashboard log tab
+                            if level == "DEBUG" || level == "TRACE" {
+                                continue;
+                            }
+                            // Filter out TDMA tick noise — thousands per second
+                            if msg.contains("tick dl") || msg.contains("tick ul") || msg.starts_with("--- tick") {
+                                continue;
+                            }
+                            dash_log.push_log(&level, msg);
+                        }
+                    })
+                    .expect("failed to spawn dashboard-log thread");
             }
 
             if has_telemetry_server {
                 let cfg2 = cfg.clone();
                 let (tee_sink, tee_source) = telemetry_channel();
-                thread::Builder::new().name("telemetry-tee".into()).spawn(move || {
-                    loop {
-                        match telemetry_source.recv() {
-                            Some(event) => {
-                                dash_clone.handle_telemetry(event.clone());
-                                let _ = tee_sink.send(event);
+                thread::Builder::new()
+                    .name("telemetry-tee".into())
+                    .spawn(move || {
+                        loop {
+                            match telemetry_source.recv() {
+                                Some(event) => {
+                                    dash_clone.handle_telemetry(event.clone());
+                                    let _ = tee_sink.send(event);
+                                }
+                                None => break,
                             }
-                            None => break,
                         }
-                    }
-                }).expect("failed to spawn telemetry-tee thread");
+                    })
+                    .expect("failed to spawn telemetry-tee thread");
                 start_telemetry_worker(cfg2, tee_source);
             } else {
-                thread::Builder::new().name("telemetry-dash".into()).spawn(move || {
-                    loop {
-                        match telemetry_source.recv() {
-                            Some(event) => dash_clone.handle_telemetry(event),
-                            None => break,
+                thread::Builder::new()
+                    .name("telemetry-dash".into())
+                    .spawn(move || {
+                        loop {
+                            match telemetry_source.recv() {
+                                Some(event) => dash_clone.handle_telemetry(event),
+                                None => break,
+                            }
                         }
-                    }
-                }).expect("failed to spawn telemetry-dash thread");
+                    })
+                    .expect("failed to spawn telemetry-dash thread");
             }
         } else if has_telemetry_server {
             start_telemetry_worker(cfg.clone(), telemetry_source);

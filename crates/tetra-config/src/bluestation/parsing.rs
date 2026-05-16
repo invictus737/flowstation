@@ -113,6 +113,13 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         }
     }
 
+    // Optional dashboard section
+    if let Some(ref dashboard) = root.dashboard {
+        if !dashboard.extra.is_empty() {
+            return Err(format!("Unrecognized fields in dashboard config: {:?}", sorted_keys(&dashboard.extra)).into());
+        }
+    }
+
     // Optional telemetry section
     if let Some(ref telemetry) = root.telemetry {
         if !telemetry.extra.is_empty() {
@@ -140,6 +147,12 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     // Build cell config, then inject the separately-parsed neighbor cells
     let mut cell_cfg = cell_dto_to_cfg(root.cell_info);
     cell_cfg.neighbor_cells_ca = neighbor_cells_ca;
+    if !cell_cfg.neighbor_cells_ca.is_empty() && cell_cfg.neighbor_cell_broadcast == 0 {
+        cell_cfg.neighbor_cell_broadcast = 2;
+    }
+    if cell_cfg.neighbor_cells_ca.is_empty() && cell_cfg.timezone.is_none() {
+        cell_cfg.neighbor_cell_broadcast = 0;
+    }
 
     // Build config from required and optional values
     let mut cfg = StackConfig {
@@ -291,6 +304,30 @@ main_carrier_number = 1586
     }
 
     #[test]
+    fn test_neighbor_cells_enable_neighbor_broadcast_indicator() {
+        let toml = minimal_toml(
+            r#"
+[[cell_info.neighbor_cells_ca]]
+cell_identifier_ca = 1
+cell_reselection_types_supported = 0
+neighbor_cell_synchronized = false
+cell_load_ca = 0
+main_carrier_number = 1585
+"#,
+        );
+        let cfg = from_toml_str(&toml).expect("parse failed");
+        assert_eq!(cfg.cell.neighbor_cells_ca.len(), 1);
+        assert_eq!(cfg.cell.neighbor_cell_broadcast, 2);
+    }
+
+    #[test]
+    fn test_empty_neighbor_broadcast_indicator_is_normalized() {
+        let cfg = from_toml_str(&minimal_toml("neighbor_cell_broadcast = 2")).expect("parse failed");
+        assert_eq!(cfg.cell.neighbor_cells_ca.len(), 0);
+        assert_eq!(cfg.cell.neighbor_cell_broadcast, 0);
+    }
+
+    #[test]
     fn test_too_many_neighbor_cells_rejected() {
         // 8 entries — should fail validation
         let entries: String = (1u8..=8)
@@ -313,6 +350,62 @@ main_carrier_number = 1586
     fn test_example_config_file_parses() {
         let toml = include_str!("../../../../example_config/config.toml");
         from_toml_str(toml).expect("example_config/config.toml should parse");
+    }
+
+    #[test]
+    fn test_dashboard_defaults_are_safe() {
+        let toml = format!(
+            "{}\n{}",
+            minimal_toml(""),
+            r#"
+[dashboard]
+"#
+        );
+        let cfg = from_toml_str(&toml).expect("parse failed");
+        let dashboard = cfg.dashboard.expect("dashboard config");
+        assert_eq!(dashboard.bind, "127.0.0.1");
+        assert!(!dashboard.allow_config_api);
+        assert!(!dashboard.allow_control_commands);
+        assert!(dashboard.auth_token.is_none());
+    }
+
+    #[test]
+    fn test_dashboard_dangerous_api_requires_token() {
+        let toml = format!(
+            "{}\n{}",
+            minimal_toml(""),
+            r#"
+[dashboard]
+allow_control_commands = true
+"#
+        );
+        assert!(from_toml_str(&toml).is_err(), "dashboard control must require auth_token");
+
+        let toml = format!(
+            "{}\n{}",
+            minimal_toml(""),
+            r#"
+[dashboard]
+bind = "0.0.0.0"
+allow_config_api = true
+auth_token = "secret-token-1234"
+"#
+        );
+        let cfg = from_toml_str(&toml).expect("parse failed");
+        assert!(cfg.dashboard.unwrap().auth_token.is_some());
+    }
+
+    #[test]
+    fn test_dashboard_rejects_unknown_fields() {
+        let toml = format!(
+            "{}\n{}",
+            minimal_toml(""),
+            r#"
+[dashboard]
+allow_config_ap = true
+"#
+        );
+        assert!(from_toml_str(&toml).is_err(), "dashboard typos must be rejected");
     }
 
     #[test]

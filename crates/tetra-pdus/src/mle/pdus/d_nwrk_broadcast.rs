@@ -157,6 +157,10 @@ mod tests {
         let mut buf = BitBuffer::new_autoexpand(128);
         pdu.to_bitbuf(&mut buf).expect("serialize");
         assert_eq!(buf.get_pos(), 75);
+        assert_eq!(
+            buf.to_bitstr(),
+            "010000000000000000000110101100101110100011100110001100011010111111111111000"
+        );
 
         buf.seek(0);
         let parsed = DNwrkBroadcast::from_bitbuf(&mut buf).expect("parse");

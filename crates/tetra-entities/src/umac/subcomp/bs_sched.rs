@@ -288,7 +288,7 @@ impl BsChannelScheduler {
     }
 
     fn fragger_is_ee_eligible(&self, fragger: &BsFragger, ts: TdmaTime) -> bool {
-        if fragger.has_started() || fragger.is_access_response() {
+        if fragger.is_access_response() {
             return true;
         }
 
@@ -1766,5 +1766,32 @@ mod tests {
             panic!("expected random-access response to remain immediate");
         };
         assert!(pdu.random_access_flag);
+    }
+
+    #[test]
+    fn test_ee_delays_followup_fragments_until_monitoring_frame() {
+        let mut sched = get_testing_slotter();
+        let addr = TetraAddress {
+            ssi_type: SsiType::Issi,
+            ssi: 1234,
+        };
+        let start = TdmaTime { t: 1, f: 5, m: 1, h: 0 };
+        let first_monitoring = TdmaTime { t: 1, f: 7, m: 1, h: 0 };
+        let sleeping = TdmaTime { t: 1, f: 8, m: 1, h: 0 };
+        let next_monitoring = TdmaTime { t: 1, f: 9, m: 1, h: 0 };
+
+        sched.set_energy_saving_window(addr.ssi, 1, Some(start));
+        let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+        sched.dl_enqueue_tma(pdu, BitBuffer::from_bitstr(&"1".repeat(SCH_F_CAP * 2)), None);
+
+        assert!(sched.dl_build_block_from_signalling_schedule(first_monitoring).is_some());
+        assert!(
+            sched.dl_take_prioritized_sched_item(sleeping).is_none(),
+            "follow-up fragment must wait while MS is sleeping"
+        );
+        assert!(matches!(
+            sched.dl_take_prioritized_sched_item(next_monitoring),
+            Some(DlSchedElem::FragBuf(_))
+        ));
     }
 }

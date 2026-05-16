@@ -307,12 +307,17 @@ voice_service = true
 
 ###############################################################################
 
-# OPTIONAL: Web dashboard — accessible at http://<BTS-IP>:8080 (FlowStation)
+# OPTIONAL: Web dashboard — local-only by default at http://127.0.0.1:8080 (FlowStation)
 #
-# Live view of terminals, active calls, log, config editor, kick and SDS.
+# Live view of terminals, active calls and log. Config editing and control commands
+# are opt-in because configs may contain secrets and control can stop the service.
 #
 # [dashboard]
 # port = 8080
+# bind = "127.0.0.1"
+# allow_config_api = false
+# allow_control_commands = false
+# auth_token = "change-me-to-a-long-random-token"
 
 ###############################################################################
 
