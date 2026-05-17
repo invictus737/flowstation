@@ -3,11 +3,67 @@ mod common;
 use tetra_config::bluestation::StackMode;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Layer2Service, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, debug};
+use tetra_pdus::umac::pdus::mac_resource::MacResource;
 use tetra_saps::lmm::LmmMleUnitdataReq;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
+use tetra_saps::tma::TmaUnitdataReq;
 use tetra_saps::tmv::{TmvUnitdataInd, enums::logical_chans::LogicalChannel};
 
 use crate::common::ComponentTest;
+
+fn first_downlink_resource_for_ssi(msgs: &[SapMsg], ssi: u32) -> Option<MacResource> {
+    for msg in msgs {
+        let SapMsgInner::TmvUnitdataReq(slot) = &msg.msg else {
+            continue;
+        };
+        for blk in [&slot.blk1, &slot.blk2].into_iter().flatten() {
+            let mut mac = BitBuffer::from_bitstr(&blk.mac_block.to_bitstr());
+            if mac.peek_bits(2) != Some(0) {
+                continue;
+            }
+            if let Ok(resource) = MacResource::from_bitbuf(&mut mac) {
+                if resource.addr.map(|addr| addr.ssi) == Some(ssi) {
+                    return Some(resource);
+                }
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn test_issi_downlink_response_carries_random_access_flag() {
+    debug::setup_logging_verbose();
+    const TEST_ISSI: u32 = 2260082;
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
+
+    test.submit_message(SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+            req_handle: 0,
+            pdu: BitBuffer::from_bitstr("00101010"),
+            main_address: TetraAddress::issi(TEST_ISSI),
+            endpoint_id: 0,
+            stealing_permission: false,
+            subscriber_class: 0,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_category: None,
+            chan_alloc: None,
+            tx_reporter: None,
+        }),
+    });
+    test.run_stack(Some(4));
+    let sink_msgs = test.dump_sinks();
+
+    let resource = first_downlink_resource_for_ssi(&sink_msgs, TEST_ISSI).expect("expected downlink MAC-RESOURCE for ISSI");
+    assert!(resource.random_access_flag);
+}
 
 #[test]
 fn test_in_fragmented_sch_hu_and_sch_f() {
