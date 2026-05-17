@@ -1712,6 +1712,11 @@ mod tests {
         sched.dump_dl_queue();
 
         assert!(sched.dltx_queues[ts.t as usize - 1].len() == 1);
+        let DlSchedElem::Resource(pdu, _, _) = &sched.dltx_queues[ts.t as usize - 1][0] else {
+            panic!("expected grant and random-access ack to integrate into a MAC-RESOURCE");
+        };
+        assert!(pdu.random_access_flag);
+        assert!(pdu.slot_granting_element.is_some());
     }
 
     #[test]

@@ -32,7 +32,7 @@ fn first_downlink_resource_for_ssi(msgs: &[SapMsg], ssi: u32) -> Option<MacResou
 }
 
 #[test]
-fn test_issi_downlink_response_carries_random_access_flag() {
+fn test_plain_issi_downlink_response_does_not_carry_random_access_flag() {
     debug::setup_logging_verbose();
     const TEST_ISSI: u32 = 2260082;
 
@@ -62,7 +62,10 @@ fn test_issi_downlink_response_carries_random_access_flag() {
     let sink_msgs = test.dump_sinks();
 
     let resource = first_downlink_resource_for_ssi(&sink_msgs, TEST_ISSI).expect("expected downlink MAC-RESOURCE for ISSI");
-    assert!(resource.random_access_flag);
+    assert!(
+        !resource.random_access_flag,
+        "random_access_flag acknowledges a real random-access event; it is not implied by ISSI addressing"
+    );
 }
 
 #[test]

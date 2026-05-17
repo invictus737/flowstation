@@ -1,0 +1,92 @@
+# Code ownership map for using docs/tetra-standards/agent.md as a TETRA expert resource.
+
+[phy]
+responsibility = "SDR setup, RF calibration hooks, RX/TX timing, burst IO, slotting handoff."
+code = [
+  "crates/tetra-entities/src/phy/",
+  "crates/tetra-pdus/src/phy/",
+]
+standards = ["TS 100 392-2", "TS 100 392-15"]
+review_focus = ["frequency math", "duplex spacing", "timing", "burst integrity", "RF changes separated from protocol changes"]
+
+[lmac]
+responsibility = "Lower MAC timing and stack mode setup."
+code = [
+  "crates/tetra-entities/src/lmac/",
+]
+standards = ["TS 100 392-2"]
+review_focus = ["timeslot/frame alignment", "stack mode", "cell parameters"]
+
+[umac]
+responsibility = "MAC PDUs, random access, grants, fragmentation, scheduling, traffic/signalling channel selection."
+code = [
+  "crates/tetra-entities/src/umac/",
+  "crates/tetra-pdus/src/umac/",
+]
+standards = ["TS 100 392-2"]
+review_focus = ["MAC-ACCESS", "MAC-RESOURCE", "random access ACK", "grant timing", "MCCH versus STCH/FACCH", "energy-saving monitoring windows"]
+
+[llc]
+responsibility = "Basic link data, acknowledged/unacknowledged LLC transfer, ACK state."
+code = [
+  "crates/tetra-entities/src/llc/",
+  "crates/tetra-pdus/src/llc/",
+]
+standards = ["TS 100 392-2"]
+review_focus = ["BL-DATA", "BL-ADATA", "BL-ACK", "N(S)/N(R)", "FCS flag", "ack expectations"]
+
+[mle]
+responsibility = "MLE routing, sysinfo/network broadcast, cell information and network time."
+code = [
+  "crates/tetra-entities/src/mle/",
+  "crates/tetra-pdus/src/mle/",
+]
+standards = ["TS 100 392-2"]
+review_focus = ["D-MLE-SYNC", "D-MLE-SYSINFO", "D-NWRK-BROADCAST", "cell parameters", "neighbour information"]
+
+[mm]
+responsibility = "Mobility management, location update, group attachment, identity/security state."
+code = [
+  "crates/tetra-entities/src/mm/",
+  "crates/tetra-pdus/src/mm/",
+]
+standards = ["TS 100 392-2", "EN 300 392-7"]
+review_focus = ["U-LOCATION-UPDATE-DEMAND", "D-LOCATION-UPDATE-ACCEPT/REJECT", "group attachment", "energy-saving information", "avoid unsolicited command loops"]
+
+[cmce]
+responsibility = "Call control, group and individual call setup, TX demand/grant/interrupt, SDS and supplementary-service facility paths."
+code = [
+  "crates/tetra-entities/src/cmce/",
+  "crates/tetra-pdus/src/cmce/",
+]
+standards = ["TS 100 392-2", "EN 300 392-12-3"]
+review_focus = ["D-SETUP", "D-CONNECT", "D-TX-GRANTED", "D-TX-INTERRUPT", "D-FACILITY", "SS-TPI", "SDS"]
+
+[saps]
+responsibility = "Layer boundary primitives and internal message contracts."
+code = [
+  "crates/tetra-saps/src/",
+]
+standards = ["TS 100 392-2"]
+review_focus = ["SAP ownership", "primitive direction", "avoiding protocol state leakage across layers"]
+
+[config_frequency]
+responsibility = "Cell identity, MCC/MNC/color code, carrier, band, duplex spacing, dashboard and identity settings."
+code = [
+  "crates/tetra-config/",
+  "crates/tetra-core/src/freqs.rs",
+  "crates/tetra-core/src/address.rs",
+]
+standards = ["EN 300 392-1", "TS 100 392-15"]
+review_focus = ["MCC/MNC", "color code", "GSSI/ISSI semantics", "carrier to Hz conversion", "duplex spacing"]
+
+[backhaul_identity]
+responsibility = "Brew/TetraPack integration, dashboard telemetry, radioid/local identity resolution."
+code = [
+  "crates/tetra-entities/src/net_brew/",
+  "crates/tetra-entities/src/net_dashboard/",
+  "crates/tetra-entities/src/net_identity/",
+  "crates/tetra-entities/src/net_telemetry/",
+]
+standards = ["EN 300 392-1", "EN 300 392-12-3"]
+review_focus = ["do not break air-interface procedures when backhaul is down", "cache identity lookup", "SS-TPI subscription/CLIR policy"]

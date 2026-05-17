@@ -1,7 +1,7 @@
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::freqs::FreqInfo;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, Todo, unimplemented_log};
+use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, TdmaTime, TetraAddress, Todo, unimplemented_log};
 use tetra_pdus::mle::fields::bs_service_details::BsServiceDetails;
 use tetra_pdus::mle::pdus::d_mle_sync::DMleSync;
 use tetra_pdus::mle::pdus::d_mle_sysinfo::DMleSysinfo;
@@ -1157,12 +1157,11 @@ impl UmacBs {
 
                     let usage_marker = prim.chan_alloc.as_ref().and_then(|ca| ca.usage);
                     let has_pending_ra = self.channel_scheduler.take_pending_ra_ack(ts, prim.main_address.ssi);
-                    let is_random_access_response = has_pending_ra || prim.main_address.ssi_type == SsiType::Issi;
                     let mut mac_pdu = MacResource {
                         fill_bits: false,
                         pos_of_grant: 0,
                         encryption_mode: 0,
-                        random_access_flag: is_random_access_response,
+                        random_access_flag: has_pending_ra,
                         length_ind: 0,
                         addr: Some(prim.main_address),
                         event_label: None,
@@ -1208,15 +1207,14 @@ impl UmacBs {
         };
 
         // Build MAC-RESOURCE optimistically (as if it would always fit in one slot).
-        // Match the stable Bluestation behaviour for BS responses on the basic link:
-        // ISSI-addressed signalling is normally a response to MS random access, while
-        // GSSI/broadcast signalling must not carry the random access flag.
-        let is_random_access_response = prim.main_address.ssi_type == SsiType::Issi;
+        // The random access flag is not an address-class marker. It is set by
+        // scheduler integration only when a matching random-access acknowledgement
+        // is pending for this resource.
         let mut pdu = MacResource {
             fill_bits: false, // Updated later
             pos_of_grant: 0,
             encryption_mode: 0,
-            random_access_flag: is_random_access_response,
+            random_access_flag: false,
             length_ind: 0, // Updated later
             addr: Some(prim.main_address),
             event_label: None,

@@ -1,0 +1,73 @@
+# FlowStation TETRA standards manifest.
+# The URLs point to official ETSI deliverables. Do not vendor ETSI PDFs into this repo.
+# For normative changes, verify the pinned version and clause before editing code.
+
+[policy]
+source_of_truth = "Official ETSI deliverables"
+copyright_policy = "Reference and summarize. Do not copy large ETSI text into repository files."
+review_rule = "Every air-interface behavior change must name the ETSI part, PDU/procedure, and clause when known."
+
+[[standards]]
+id = "EN 300 392-1"
+title = "Terrestrial Trunked Radio (TETRA); Voice plus Data (V+D); General network design"
+scope = "Architecture, identities, services, and high-level V+D model."
+flowstation_layers = ["architecture", "addressing", "config"]
+url = "https://www.etsi.org/deliver/etsi_en/300300_300399/30039201/01.02.01_60/en_30039201v010201p.pdf"
+
+[[standards]]
+id = "TS 100 392-2"
+version = "3.10.1"
+title = "Terrestrial Trunked Radio (TETRA); Voice plus Data (V+D); Part 2: Air Interface"
+scope = "MAC, LLC, MLE, MM, CMCE air-interface procedures and PDU formats used by a BS."
+flowstation_layers = ["umac", "llc", "mle", "mm", "cmce"]
+url = "https://www.etsi.org/deliver/etsi_ts/100300_100399/10039202/03.10.01_60/ts_10039202v031001p.pdf"
+
+[[standards]]
+id = "EN 300 392-7"
+version = "3.5.1"
+title = "Terrestrial Trunked Radio (TETRA); Voice plus Data (V+D); Security"
+scope = "Authentication, ciphering, keying, and security procedures. Use before changing security flags or auth/cipher state."
+flowstation_layers = ["mm", "security", "config"]
+url = "https://www.etsi.org/deliver/etsi_en/300300_300399/30039207/03.05.01_60/en_30039207v030501p.pdf"
+
+[[standards]]
+id = "EN 300 392-12-3"
+version = "1.3.1"
+title = "Supplementary services stage 3; Talking Party Identification (TPI)"
+scope = "SS-TPI facility PDU behavior, talking/sending party identity, mnemonic name, CLIR/subscription constraints."
+flowstation_layers = ["cmce", "supplementary-services", "identity"]
+url = "https://www.etsi.org/deliver/etsi_en/300300_300399/3003921203/01.03.01_60/en_3003921203v010301p.pdf"
+
+[[standards]]
+id = "TS 100 392-15"
+version = "1.4.1"
+title = "TETRA V+D; Part 15: TETRA frequency bands, duplex spacings and channel numbering"
+scope = "Band, carrier, offset, duplex spacing, reverse operation, and channel numbering."
+flowstation_layers = ["config", "freqs", "phy"]
+url = "https://www.etsi.org/deliver/etsi_ts/100300_100399/10039215/01.04.01_60/ts_10039215v010401p.pdf"
+
+[[standards]]
+id = "EN 300 392-12-x"
+title = "TETRA V+D supplementary services stage 3 family"
+scope = "Supplementary service encoding and procedures. Use the exact sub-part before implementing SS fields."
+flowstation_layers = ["cmce", "supplementary-services"]
+url = "https://www.etsi.org/standards"
+
+[[rules]]
+name = "mac_resource_random_access_flag"
+standard = "TS 100 392-2"
+clause = "21.4.3.1"
+summary = "MAC-RESOURCE random access indication is tied to Random Access Acknowledged. It must not be derived from address type alone."
+code = ["crates/tetra-entities/src/umac/umac_bs.rs", "crates/tetra-entities/src/umac/subcomp/bs_sched.rs", "crates/tetra-pdus/src/umac/pdus/mac_resource.rs"]
+
+[[rules]]
+name = "location_update_completion"
+standard = "TS 100 392-2"
+summary = "Normal attach/location update completion is D-LOCATION-UPDATE-ACCEPT. D-LOCATION-UPDATE-COMMAND is a SwMI-initiated procedure, not an automatic post-accept follow-up."
+code = ["crates/tetra-entities/src/mm/mm_bs.rs", "crates/tetra-pdus/src/mm/pdus/d_location_update_accept.rs", "crates/tetra-pdus/src/mm/pdus/d_location_update_command.rs"]
+
+[[rules]]
+name = "ss_tpi_facility_path"
+standard = "EN 300 392-12-3"
+summary = "SS-TPI identity and mnemonic name belong to the supplementary-service facility INFORM path, guarded by CLIR and subscription policy."
+code = ["crates/tetra-pdus/src/cmce/fields/ss_tpi.rs", "crates/tetra-entities/src/cmce"]
