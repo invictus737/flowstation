@@ -211,11 +211,7 @@ impl UmacBs {
     /// Otherwise, value from config is used.
     fn get_system_wide_services_state(config: &SharedConfig) -> bool {
         let cfg = config.config();
-        if cfg.brew.is_some() {
-            config.state_read().network_connected
-        } else {
-            cfg.cell.system_wide_services
-        }
+        cfg.cell.system_wide_services
     }
 
     fn refresh_system_wide_services(&mut self) {

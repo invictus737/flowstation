@@ -246,7 +246,7 @@ fn test_location_update_accept_preserves_request_type_when_periodic_enabled() {
 }
 
 #[test]
-fn test_location_update_energy_saving_forces_stay_alive_until_ee_scheduler_exists() {
+fn test_location_update_energy_saving_request_is_not_acknowledged_until_ee_scheduler_exists() {
     debug::setup_logging_verbose();
 
     let lud_with_eg1 =
@@ -287,11 +287,10 @@ fn test_location_update_energy_saving_forces_stay_alive_until_ee_scheduler_exist
 
     let mut resp_sdu = BitBuffer::from_bitstr(&response.sdu.to_bitstr());
     let resp_pdu = DLocationUpdateAccept::from_bitbuf(&mut resp_sdu).expect("failed parsing D-LOCATION UPDATE ACCEPT");
-    let esi = resp_pdu.energy_saving_information.expect("expected energy saving information");
-
-    assert_eq!(esi.energy_saving_mode, EnergySavingMode::StayAlive);
-    assert!(esi.frame_number.is_none());
-    assert!(esi.multiframe_number.is_none());
+    assert!(
+        resp_pdu.energy_saving_information.is_none(),
+        "do not acknowledge EE in D-LOCATION-UPDATE-ACCEPT until UMAC has real monitoring-window scheduling"
+    );
 
     let umac_update = sink_msgs
         .iter()

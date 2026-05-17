@@ -258,29 +258,21 @@ impl MmBs {
         }
 
         // Handle Energy Saving Mode request (ETSI EN 300 392-2, clauses 16.10.10/23.7.6).
-        // Allocate a future start point so the accept and any immediate follow-up signalling
-        // are delivered before the MS begins periodic monitoring.
+        // Real EE support needs UMAC scheduling around MS monitoring windows. Until
+        // that path is complete, do not acknowledge an EE mode in D-LOCATION-UPDATE-ACCEPT:
+        // keep local state as StayAlive and keep the downlink accept close to the
+        // stable Bluestation format.
         let (esi, esi_start_time) = if let Some(esm) = pdu.energy_saving_mode {
-            let (esi, start_time) = self.allocate_energy_saving_information(esm);
             if esm != EnergySavingMode::StayAlive {
                 tracing::info!(
-                    "MS {} requested {:?}; forcing StayAlive because EE scheduling is disabled",
+                    "MS {} requested {:?}; ignoring EE request because EE scheduling is disabled",
                     prim.received_address.ssi,
                     esm,
                 );
-            } else if let Some(start_time) = start_time {
-                tracing::info!(
-                    "MS {} granted {:?}: monitoring starts frame={} multiframe={} ({})",
-                    prim.received_address.ssi,
-                    esi.energy_saving_mode,
-                    esi.frame_number.unwrap_or(0),
-                    esi.multiframe_number.unwrap_or(0),
-                    start_time,
-                );
             } else {
-                tracing::info!("MS {} granted StayAlive", prim.received_address.ssi);
+                tracing::info!("MS {} requested StayAlive", prim.received_address.ssi);
             }
-            (Some(esi), start_time)
+            (None, None)
         } else {
             (None, None)
         };
