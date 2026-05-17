@@ -308,15 +308,21 @@ impl MmBs {
             //
             // B) PeriodicLocationUpdating — healthy MS renewing its T351 timer. No cleanup.
             //
-            // C) DemandLocationUpdating — MS responding to our D-LOCATION-UPDATE-COMMAND.
+            // C) MS responding to our D-LOCATION-UPDATE-COMMAND.
             //    This is the second message in the normal registration flow; the first message
             //    already registered+affiliated the MS. Do NOT clean up here.
-            let needs_cleanup = pdu.location_update_type == LocationUpdateType::RoamingLocationUpdating
-                || pdu.location_update_type == LocationUpdateType::ServiceRestorationRoamingLocationUpdating;
+            let swmi_commanded_update = was_pending || was_forced_location_update;
+            let needs_cleanup = !swmi_commanded_update
+                && (pdu.location_update_type == LocationUpdateType::RoamingLocationUpdating
+                    || pdu.location_update_type == LocationUpdateType::ServiceRestorationRoamingLocationUpdating);
 
             // needs_cleanup: Roaming = MS rebooted, need CMCE reset.
-            // was_pending: periodic refresh response, no cleanup/re-register needed.
-            if needs_cleanup {
+            // swmi_commanded_update: terminal may legally answer our command with
+            // several LU types; do not tear down Brew/CMCE state for a commanded
+            // refresh.
+            if swmi_commanded_update {
+                tracing::info!("MM: ISSI {} answered SwMI commanded location update", issi);
+            } else if needs_cleanup {
                 let old_groups: Vec<u32> = self
                     .client_mgr
                     .get_client_by_issi(issi)
@@ -327,8 +333,6 @@ impl MmBs {
                 }
                 self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
                 self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
-            } else if was_pending {
-                tracing::info!("MM: ISSI {} answered periodic registration refresh", issi);
             }
             // Always reset the registration timer on any re-registration
             self.client_mgr.reset_registration_timer(issi);
@@ -485,17 +489,11 @@ impl MmBs {
         };
         queue.push_back(msg);
 
-        // Send D-LOCATION-UPDATE-COMMAND only on genuine first attach (ItsiAttach or Demand),
-        // NOT on RoamingLocationUpdating. Motorola terminals (MTM800, MXP600) respond to
-        // D-LOCATION-UPDATE-COMMAND with another RoamingLocationUpdating instead of
-        // DemandLocationUpdating, which triggers needs_cleanup=true → Deregister → is_new=true
-        // again, creating an infinite registration loop.
-        let is_roaming = pdu.location_update_type == LocationUpdateType::RoamingLocationUpdating
-            || pdu.location_update_type == LocationUpdateType::ServiceRestorationRoamingLocationUpdating;
-        if is_new && !is_roaming && !was_forced_location_update {
-            tracing::info!("Sending D-LOCATION UPDATE COMMAND to MS {} to prompt TEI and group report", issi);
-            Self::send_d_location_update_command(queue, issi, handle, true);
-        }
+        // ETSI location update is complete after D-LOCATION-UPDATE-ACCEPT.
+        // Do not append a spontaneous D-LOCATION-UPDATE-COMMAND here: when the
+        // group report bit is set, terminals can detach and re-report all group
+        // identities, causing visible service churn. Keep that command for
+        // explicit recovery paths only.
     }
 
     fn rx_u_mm_status(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
@@ -1359,6 +1357,7 @@ impl MmBs {
         );
         for (issi, handle) in clients {
             tracing::debug!("mm_bs: re-registering ISSI {} (handle={})", issi, handle);
+            self.forced_location_updates.insert(issi);
             Self::send_d_location_update_command(queue, issi, handle, true);
         }
     }
