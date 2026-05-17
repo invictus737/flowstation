@@ -45,7 +45,8 @@ fn test_u_mm_status_energy_saving() {
     test.run_stack(Some(1));
     let sink_msgs = test.dump_sinks();
 
-    // Energy saving mode requests now get a D-MM-STATUS ChangeOfEnergySavingModeResponse
+    // FlowStation explicitly allocates StayAlive until addressed downlink EE
+    // scheduling is complete.
     assert_eq!(sink_msgs.len(), 1);
 
     // Parse the response and verify it's a D-MM-STATUS
@@ -59,9 +60,9 @@ fn test_u_mm_status_energy_saving() {
         tetra_pdus::mm::enums::status_downlink::StatusDownlink::ChangeOfEnergySavingModeResponse
     );
     let esi = resp_pdu.energy_saving_information.expect("expected energy saving information");
-    assert_ne!(esi.energy_saving_mode, EnergySavingMode::StayAlive);
-    assert!(esi.frame_number.is_some());
-    assert!(esi.multiframe_number.is_some());
+    assert_eq!(esi.energy_saving_mode, EnergySavingMode::StayAlive);
+    assert!(esi.frame_number.is_none());
+    assert!(esi.multiframe_number.is_none());
 }
 
 #[test]
@@ -112,7 +113,7 @@ fn test_location_update_accept_preserves_request_type_when_periodic_enabled() {
 }
 
 #[test]
-fn test_location_update_energy_saving_grants_monitoring_window() {
+fn test_location_update_energy_saving_forces_stay_alive_until_ee_scheduler_exists() {
     debug::setup_logging_verbose();
 
     let lud_with_eg1 =
@@ -155,9 +156,9 @@ fn test_location_update_energy_saving_grants_monitoring_window() {
     let resp_pdu = DLocationUpdateAccept::from_bitbuf(&mut resp_sdu).expect("failed parsing D-LOCATION UPDATE ACCEPT");
     let esi = resp_pdu.energy_saving_information.expect("expected energy saving information");
 
-    assert_eq!(esi.energy_saving_mode, EnergySavingMode::Eg1);
-    assert!(esi.frame_number.is_some());
-    assert!(esi.multiframe_number.is_some());
+    assert_eq!(esi.energy_saving_mode, EnergySavingMode::StayAlive);
+    assert!(esi.frame_number.is_none());
+    assert!(esi.multiframe_number.is_none());
 
     let umac_update = sink_msgs
         .iter()
@@ -171,8 +172,6 @@ fn test_location_update_energy_saving_grants_monitoring_window() {
         .expect("expected MM energy-saving update to UMAC");
 
     assert_eq!(umac_update.0, 2260616);
-    assert_eq!(umac_update.1, EnergySavingMode::Eg1 as u8);
-    let start_time = umac_update.2.expect("expected UMAC start time");
-    assert_eq!(Some(start_time.f), esi.frame_number);
-    assert_eq!(Some(start_time.m), esi.multiframe_number);
+    assert_eq!(umac_update.1, EnergySavingMode::StayAlive as u8);
+    assert!(umac_update.2.is_none());
 }
