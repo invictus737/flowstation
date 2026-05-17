@@ -1,7 +1,9 @@
+use std::collections::HashMap;
+
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::freqs::FreqInfo;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, TdmaTime, TetraAddress, Todo, unimplemented_log};
+use tetra_core::{BitBuffer, Direction, PhyBlockNum, Sap, SsiType, TdmaTime, TetraAddress, Todo, unimplemented_log};
 use tetra_pdus::mle::fields::bs_service_details::BsServiceDetails;
 use tetra_pdus::mle::pdus::d_mle_sync::DMleSync;
 use tetra_pdus::mle::pdus::d_mle_sysinfo::DMleSysinfo;
@@ -36,6 +38,8 @@ use crate::{MessagePrio, MessageQueue, TetraEntityTrait};
 
 use super::subcomp::bs_defrag::BsDefrag;
 
+const RANDOM_ACCESS_RESPONSE_WINDOW_TS: i32 = 72;
+
 pub struct UmacBs {
     self_component: TetraEntity,
     config: SharedConfig,
@@ -54,6 +58,12 @@ pub struct UmacBs {
     /// Contains UL/DL scheduling logic
     /// Access to this field is used only by testing code
     pub channel_scheduler: BsChannelScheduler,
+    /// Recent uplink random-access events, keyed by ISSI. ETSI ties
+    /// random_access_flag to an actual random-access acknowledgement, not to
+    /// address class; this lets the first normal addressed response after
+    /// MAC-ACCESS carry that acknowledgement even when the initial grant was
+    /// already sent in a minimal MAC-RESOURCE.
+    recent_random_access: HashMap<u32, TdmaTime>,
     // ulrx_scheduler: UlScheduler,
     /// Timestamp of last received UL voice frame per timeslot (0-indexed: ts1..ts4).
     /// Used to detect UL inactivity when a radio disappears mid-transmission.
@@ -84,6 +94,7 @@ impl UmacBs {
             pending_stch: None,
             // event_label_store: EventLabelStore::new(),
             channel_scheduler: BsChannelScheduler::new(scrambling_code, precomps),
+            recent_random_access: HashMap::new(),
             last_ul_voice: [None; 4],
         }
     }
@@ -663,6 +674,9 @@ impl UmacBs {
         // let ul_time = message.dltime.add_timeslots(-2);
         let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
         self.channel_scheduler.dl_enqueue_random_access_ack(msg_dltime.t, addr);
+        if addr.ssi_type == SsiType::Issi {
+            self.recent_random_access.insert(addr.ssi, msg_dltime);
+        }
 
         // Notify MM of RSSI for this MS so it can be stored per-subscriber.
         // Only sent when RSSI is a finite value (i.e. demodulator calculated it).
@@ -1202,15 +1216,18 @@ impl UmacBs {
             (None, None)
         };
 
+        let random_access_flag = self.take_recent_random_access_response(&prim.main_address)
+            || (prim.main_address.ssi_type == SsiType::Issi && self.channel_scheduler.take_pending_ra_ack(1, prim.main_address.ssi));
+
         // Build MAC-RESOURCE optimistically (as if it would always fit in one slot).
-        // The random access flag is not an address-class marker. It is set by
-        // scheduler integration only when a matching random-access acknowledgement
-        // is pending for this resource.
+        // The random access flag is not an address-class marker. It is set only
+        // for a real random-access response: either a recent MAC-ACCESS for this
+        // ISSI or a scheduler-retained acknowledgement.
         let mut pdu = MacResource {
             fill_bits: false, // Updated later
             pos_of_grant: 0,
             encryption_mode: 0,
-            random_access_flag: false,
+            random_access_flag,
             length_ind: 0, // Updated later
             addr: Some(prim.main_address),
             event_label: None,
@@ -1233,6 +1250,24 @@ impl UmacBs {
 
         // let enqueue_ts = 1;
         // self.channel_scheduler.dl_enqueue_tma(enqueue_ts, pdu, sdu, prim.tx_reporter);
+    }
+
+    fn take_recent_random_access_response(&mut self, addr: &TetraAddress) -> bool {
+        if addr.ssi_type != SsiType::Issi {
+            return false;
+        }
+
+        let Some(access_time) = self.recent_random_access.remove(&addr.ssi) else {
+            return false;
+        };
+
+        let age = access_time.age(self.dltime);
+        if (0..=RANDOM_ACCESS_RESPONSE_WINDOW_TS).contains(&age) {
+            true
+        } else {
+            tracing::debug!("random-access response window expired for ISSI {}: age={} timeslots", addr.ssi, age);
+            false
+        }
     }
 
     fn rx_tma_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
