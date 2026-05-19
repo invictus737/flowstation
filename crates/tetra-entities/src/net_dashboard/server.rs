@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -65,6 +66,9 @@ type SharedUpdateState = Arc<Mutex<UpdateState>>;
 const UPDATE_SOURCE_DIR_ENV: &str = "FLOWSTATION_UPDATE_SOURCE_DIR";
 const MAX_CONFIG_BODY_BYTES: usize = 256 * 1024;
 const MAX_PROFILE_BODY_BYTES: usize = 1024;
+const RSSI_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
+const TS_VOICE_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const RF_MONITOR_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn find_git_source_dir(config_path: &str) -> Option<PathBuf> {
     if let Ok(value) = std::env::var(UPDATE_SOURCE_DIR_ENV) {
@@ -268,6 +272,8 @@ pub struct DashboardServer {
     update_state: SharedUpdateState,
     /// Last time a ts_voice WS message was broadcast per TS (indexed 0..3 for TS1..TS4)
     ts_last_broadcast: std::sync::Mutex<[std::time::Instant; 4]>,
+    rssi_last_broadcast: std::sync::Mutex<HashMap<u32, std::time::Instant>>,
+    rf_last_broadcast: std::sync::Mutex<std::time::Instant>,
 }
 
 impl DashboardServer {
@@ -280,7 +286,9 @@ impl DashboardServer {
             cmd_tx: None,
             phy_cmd_tx: None,
             update_state: Arc::new(Mutex::new(UpdateState::new())),
-            ts_last_broadcast: std::sync::Mutex::new([now; 4]),
+            ts_last_broadcast: std::sync::Mutex::new([now - TS_VOICE_BROADCAST_INTERVAL; 4]),
+            rssi_last_broadcast: std::sync::Mutex::new(HashMap::new()),
+            rf_last_broadcast: std::sync::Mutex::new(now - RF_MONITOR_BROADCAST_INTERVAL),
         }
     }
 
@@ -486,21 +494,9 @@ impl DashboardServer {
                 }
             }
         }
-        if let Some(json) = msg {
-            self.broadcast(&json);
-        }
-        // TsVoiceActivity: rate-limit broadcasts to max 4/sec per TS (250ms cooldown)
-        if let TelemetryEvent::TsVoiceActivity { ts } = &event {
-            let idx = (ts.saturating_sub(1) as usize).min(3);
-            let now = std::time::Instant::now();
-            if let Ok(mut arr) = self.ts_last_broadcast.try_lock() {
-                if now.duration_since(arr[idx]) >= std::time::Duration::from_millis(250) {
-                    arr[idx] = now;
-                    drop(arr);
-                    if let Some(json) = event_to_ws_msg(&event) {
-                        self.broadcast(&json);
-                    }
-                }
+        if self.should_broadcast_telemetry(&event) {
+            if let Some(json) = msg {
+                self.broadcast(&json);
             }
         }
     }
@@ -522,7 +518,54 @@ impl DashboardServer {
 
     fn broadcast(&self, msg: &str) {
         let mut clients = self.clients.lock().unwrap();
-        clients.retain(|tx| tx.send(msg.to_owned()).is_ok());
+        clients.retain(|tx| match tx.try_send(msg.to_owned()) {
+            Ok(()) => true,
+            Err(crossbeam_channel::TrySendError::Full(_)) => true,
+            Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
+        });
+    }
+
+    fn should_broadcast_telemetry(&self, event: &TelemetryEvent) -> bool {
+        match event {
+            TelemetryEvent::MsRssi { issi, .. } => {
+                let now = std::time::Instant::now();
+                let Ok(mut last_by_issi) = self.rssi_last_broadcast.try_lock() else {
+                    return false;
+                };
+                let should_send = match last_by_issi.get(issi) {
+                    Some(last) => now.duration_since(*last) >= RSSI_BROADCAST_INTERVAL,
+                    None => true,
+                };
+                if should_send {
+                    last_by_issi.insert(*issi, now);
+                }
+                should_send
+            }
+            TelemetryEvent::TsVoiceActivity { ts } => {
+                let idx = (ts.saturating_sub(1) as usize).min(3);
+                let now = std::time::Instant::now();
+                let Ok(mut arr) = self.ts_last_broadcast.try_lock() else {
+                    return false;
+                };
+                let should_send = now.duration_since(arr[idx]) >= TS_VOICE_BROADCAST_INTERVAL;
+                if should_send {
+                    arr[idx] = now;
+                }
+                should_send
+            }
+            TelemetryEvent::TxMonitor { .. } | TelemetryEvent::RfLoopbackMonitor { .. } => {
+                let now = std::time::Instant::now();
+                let Ok(mut last) = self.rf_last_broadcast.try_lock() else {
+                    return false;
+                };
+                let should_send = now.duration_since(*last) >= RF_MONITOR_BROADCAST_INTERVAL;
+                if should_send {
+                    *last = now;
+                }
+                should_send
+            }
+            _ => true,
+        }
     }
 }
 
@@ -834,7 +877,7 @@ fn handle_ws(
     };
 
     // Register this connection for broadcasts
-    let (broadcast_tx, broadcast_rx) = crossbeam_channel::unbounded::<String>();
+    let (broadcast_tx, broadcast_rx) = crossbeam_channel::bounded::<String>(256);
     {
         let mut c = clients.lock().unwrap();
         c.push(broadcast_tx);

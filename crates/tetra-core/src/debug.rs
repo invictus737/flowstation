@@ -231,6 +231,9 @@ where
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
         let Some(tx) = DASHBOARD_LOG_TX.get() else { return };
         let level = event.metadata().level().to_string();
+        if level == "DEBUG" || level == "TRACE" {
+            return;
+        }
         let mut msg = String::new();
         let mut visitor = StringVisitor(&mut msg);
         event.record(&mut visitor);

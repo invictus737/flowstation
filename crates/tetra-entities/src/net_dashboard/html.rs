@@ -1285,15 +1285,33 @@ function showPage(name,el){
   document.getElementById('topbar-title').textContent=t(name)||name;
   if(name==='config')loadConfig();
   if(name==='system'){loadSystemInfo();loadConfigProfiles();}
+  if(name==='rf'&&latestRfMsg)updateRfMonitor(latestRfMsg);
   if(window.innerWidth<=700)closeMobileSidebar();
 }
 
 // ── State + WS ────────────────────────────────────────────────────────────
-let ws=null,state={ms:{},calls:{},lastHeard:[],brewOnline:false,brewVer:0},sdsDest=0;
+let ws=null,state={ms:{},calls:{},lastHeard:[],brewOnline:false,brewVer:0},sdsDest=0,latestRfMsg=null;
+let stationsRenderTimer=null,callsRenderTimer=null,lastHeardRenderTimer=null;
 const logFilter=()=>document.getElementById('log-filter').value;
 function ensureMs(issi){
   if(!state.ms[issi])state.ms[issi]={issi,groups:[],rssi_dbfs:null,energy_saving_mode:0,_last_seen_ts:Date.now()};
   return state.ms[issi];
+}
+function pageActive(name){const el=document.getElementById('page-'+name);return !!(el&&el.classList.contains('active'));}
+function scheduleStationsRender(delay=160){
+  if(!pageActive('stations'))return;
+  if(stationsRenderTimer)return;
+  stationsRenderTimer=setTimeout(()=>{stationsRenderTimer=null;renderStations();},delay);
+}
+function scheduleCallsRender(delay=200){
+  if(!pageActive('calls'))return;
+  if(callsRenderTimer)return;
+  callsRenderTimer=setTimeout(()=>{callsRenderTimer=null;renderCalls();},delay);
+}
+function scheduleLastHeardRender(delay=200){
+  if(!pageActive('lastheard'))return;
+  if(lastHeardRenderTimer)return;
+  lastHeardRenderTimer=setTimeout(()=>{lastHeardRenderTimer=null;renderLastHeard();},delay);
 }
 
 function setBrewStatus(online,version){
@@ -1358,7 +1376,7 @@ function handleMsg(msg){
       if(msg.log&&msg.log.length){document.getElementById('log-container').innerHTML='';msg.log.forEach(e=>appendLog(e));}
       setBrewStatus(!!msg.brew_online,msg.brew_version||0);
       if(msg.rf_gains)applyRfGainSnapshot(msg.rf_gains);
-      if(msg.last_rf_loopback)updateRfMonitor({...msg.last_rf_loopback,type:'rf_loopback_monitor'});
+      if(msg.last_rf_loopback){latestRfMsg={...msg.last_rf_loopback,type:'rf_loopback_monitor'};if(pageActive('rf'))updateRfMonitor(latestRfMsg);}
       renderAll();break;
     case 'brew_status':
       setBrewStatus(!!msg.connected,msg.brew_version||0);break;
@@ -1369,7 +1387,7 @@ function handleMsg(msg){
       delete state.ms[msg.issi];renderStations();break;
     case 'ms_rssi':
       {const m=ensureMs(msg.issi);m.rssi_dbfs=msg.rssi_dbfs;m._last_seen_ts=Date.now();}
-      renderStations();break;
+      scheduleStationsRender();break;
     case 'ms_groups':
       {const m=ensureMs(msg.issi),cur=new Set(m.groups||[]);(msg.groups||[]).forEach(g=>cur.add(g));m.groups=[...cur];m._last_seen_ts=Date.now();}
       renderStations();break;
@@ -1395,13 +1413,13 @@ function handleMsg(msg){
     case 'ts_voice':
       tsVoice(msg.ts);break;
     case 'tx_monitor':
-      updateRfMonitor(msg);break;
+      latestRfMsg=msg;if(pageActive('rf'))updateRfMonitor(msg);break;
     case 'rf_loopback_monitor':
-      updateRfMonitor(msg);break;
+      latestRfMsg=msg;if(pageActive('rf'))updateRfMonitor(msg);break;
     case 'speaker_changed':
       if(state.calls[msg.call_id])state.calls[msg.call_id].active_speaker=msg.speaker_issi;
-      if(msg.last_heard){pushLastHeard(msg.last_heard);renderLastHeard();}
-      renderCalls();break;
+      if(msg.last_heard){pushLastHeard(msg.last_heard);scheduleLastHeardRender();}
+      scheduleCallsRender();break;
     case 'ms_energy_saving':
       if(state.ms[msg.issi])state.ms[msg.issi].energy_saving_mode=msg.mode;
       renderStations();break;
@@ -1886,10 +1904,10 @@ function updateSysBtsPanel(online,brewOnline,brewVer){
 
 // ── Tick ──────────────────────────────────────────────────────────────────
 setInterval(()=>{
-  if(document.getElementById('page-calls').classList.contains('active'))renderCalls();
-  if(document.getElementById('page-stations').classList.contains('active'))renderStations();
-  if(document.getElementById('page-lastheard').classList.contains('active'))renderLastHeard();
-  if(document.getElementById('page-system').classList.contains('active'))updateSystemUptime();
+  if(pageActive('calls'))renderCalls();
+  if(pageActive('stations'))renderStations();
+  if(pageActive('lastheard'))renderLastHeard();
+  if(pageActive('system'))updateSystemUptime();
 },1000);
 
 // ── Init ──────────────────────────────────────────────────────────────────

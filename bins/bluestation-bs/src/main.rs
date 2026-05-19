@@ -223,7 +223,7 @@ fn main() {
 
     // If dashboard is enabled, set up log capture channel BEFORE logging initialises
     let dashboard_log_rx = if cfg.config().dashboard.is_some() {
-        let (tx, rx) = crossbeam_channel::unbounded::<(String, String)>();
+        let (tx, rx) = crossbeam_channel::bounded::<(String, String)>(1024);
         debug::set_dashboard_log_sender(tx);
         Some(rx)
     } else {
