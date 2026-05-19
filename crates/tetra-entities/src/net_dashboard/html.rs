@@ -344,6 +344,10 @@ td code{
   letter-spacing:0.04em;transition:all 0.15s;white-space:nowrap;
 }
 .btn:hover{border-color:var(--accent2);color:var(--accent2);background:rgba(77,166,255,0.06);}
+.btn:disabled,.btn:disabled:hover{
+  cursor:not-allowed;opacity:0.45;color:var(--text3);
+  border-color:var(--border);background:var(--bg3);
+}
 .btn-primary{background:rgba(0,212,168,0.1);border-color:rgba(0,212,168,0.4);color:var(--accent);}
 .btn-primary:hover{background:rgba(0,212,168,0.18);border-color:var(--accent);}
 .btn-danger{color:var(--text2);}
@@ -716,6 +720,7 @@ td code{
     <!-- Copyright + client info -->
     <div class="sidebar-copyright">
       <div class="cr-line">© 2026 Razvan Zeces — YO6RZV</div>
+      <div class="cr-line">MOD by Chris YO3TCO</div>
       <div class="cr-line" id="cr-ua">—</div>
     </div>
     <!-- Collapse toggle -->
@@ -968,7 +973,7 @@ td code{
           <div class="card-actions">
             <button class="btn btn-warn" onclick="restartService()" data-i18n="restart">⟳ Restart</button>
             <button class="btn btn-danger" onclick="shutdownService()" data-i18n="shutdown">⏻ Shutdown</button>
-            <button class="btn" onclick="startUpdate()" data-i18n="update">⬆ Update</button>
+            <button class="btn" id="update-btn" data-i18n="update" title="Disabled in MOD build" disabled>⬆ Update</button>
             <button class="btn btn-primary" onclick="saveConfig()" data-i18n="save">Save</button>
           </div>
         </div>
