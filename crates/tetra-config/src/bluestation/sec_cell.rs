@@ -271,6 +271,14 @@ pub struct CellInfoDto {
 }
 
 pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
+    let broadcasts_d_nwrk = ci.timezone.is_some() || !ci.neighbor_cells_ca.is_empty();
+    let mut neighbor_cell_broadcast = ci.neighbor_cell_broadcast.unwrap_or(0).min(2);
+    if broadcasts_d_nwrk {
+        // FlowStation emits D-NWRK-BROADCAST proactively and does not implement
+        // D-NWRK-BROADCAST ENQUIRY responses, so advertise broadcast-only.
+        neighbor_cell_broadcast = 2;
+    }
+
     CfgCellInfo {
         main_carrier: ci.main_carrier,
         freq_band: ci.freq_band,
@@ -279,7 +287,7 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
         reverse_operation: ci.reverse_operation,
         custom_duplex_spacing: ci.custom_duplex_spacing,
         location_area: ci.location_area,
-        neighbor_cell_broadcast: ci.neighbor_cell_broadcast.unwrap_or(0),
+        neighbor_cell_broadcast,
         late_entry_supported: ci.late_entry_supported.unwrap_or(false),
         subscriber_class: ci.subscriber_class.unwrap_or(65535), // All subscriber classes allowed
         registration: ci.registration.unwrap_or(true),

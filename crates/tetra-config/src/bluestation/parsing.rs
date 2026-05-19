@@ -315,6 +315,29 @@ main_carrier_number = 1586
     }
 
     #[test]
+    fn test_timezone_enables_d_nwrk_broadcast_advertisement() {
+        let toml = minimal_toml(
+            r#"
+timezone = "Europe/Bucharest"
+"#,
+        );
+        let cfg = from_toml_str(&toml).expect("parse failed");
+        assert_eq!(cfg.cell.neighbor_cell_broadcast, 2);
+    }
+
+    #[test]
+    fn test_timezone_uses_broadcast_only_even_if_enquiry_configured() {
+        let toml = minimal_toml(
+            r#"
+neighbor_cell_broadcast = 1
+timezone = "Europe/Bucharest"
+"#,
+        );
+        let cfg = from_toml_str(&toml).expect("parse failed");
+        assert_eq!(cfg.cell.neighbor_cell_broadcast, 2);
+    }
+
+    #[test]
     fn test_too_many_neighbor_cells_rejected() {
         // 8 entries — should fail validation
         let entries: String = (1u8..=8)

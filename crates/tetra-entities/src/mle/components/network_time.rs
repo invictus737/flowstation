@@ -22,8 +22,8 @@ pub fn encode_tetra_network_time(tz_name: &str) -> Option<u64> {
 fn encode_tetra_network_time_inner(now_utc: chrono::DateTime<Utc>, tz: chrono_tz::Tz) -> Option<u64> {
     // Seconds since Jan 1 00:00:00 UTC of the current year, divided by 2
     let year = now_utc.year();
-    let year_start = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).single()?;
-    let secs_since_year_start = (now_utc - year_start).num_seconds();
+    let year_start = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).earliest()?;
+    let secs_since_year_start = (now_utc - year_start).num_seconds().max(0);
     let utc_time: u64 = (secs_since_year_start / 2) as u64 & 0xFF_FFFF; // 24 bits
 
     // Compute local time offset from UTC
@@ -111,5 +111,34 @@ mod tests {
     #[test]
     fn test_invalid_timezone() {
         assert!(encode_tetra_network_time("Invalid/Timezone").is_none());
+    }
+
+    #[test]
+    fn test_encode_city_timezone_offsets() {
+        let cases = [
+            ("Europe/Berlin", 2026, 1, 15, 4),
+            ("Europe/Berlin", 2026, 7, 15, 8),
+            ("Europe/Bucharest", 2026, 1, 15, 8),
+            ("Europe/Bucharest", 2026, 7, 15, 12),
+            ("Asia/Shanghai", 2026, 1, 15, 32),
+            ("Asia/Chongqing", 2026, 1, 15, 32),
+            ("Asia/Tokyo", 2026, 1, 15, 36),
+            ("Japan", 2026, 1, 15, 36),
+        ];
+
+        for (tz_name, year, month, day, expected_offset_quarters) in cases {
+            let dt = Utc.with_ymd_and_hms(year, month, day, 10, 0, 0).unwrap();
+            let tz: chrono_tz::Tz = tz_name.parse().unwrap();
+            let value = encode_tetra_network_time_inner(dt, tz).unwrap();
+
+            assert_eq!((value >> 23) & 1, 0, "{tz_name} should be east of UTC");
+            assert_eq!(
+                (value >> 17) & 0x3F,
+                expected_offset_quarters,
+                "{tz_name} offset should match 15-minute increments"
+            );
+            assert_eq!((value >> 11) & 0x3F, (year - 2000) as u64, "{tz_name} year");
+            assert_eq!(value & 0x7FF, 0x7FF, "{tz_name} reserved bits");
+        }
     }
 }
