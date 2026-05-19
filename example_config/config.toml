@@ -64,6 +64,10 @@ rx_freq = 433025000
 #
 # [phy_io.soapysdr.sx1255_autocal]
 # enabled = true
+# Reuse the last successful startup loopback calibration from calibration.toml
+# next to this config file. If the file is missing or invalid, FlowStation runs
+# the full startup calibration and writes a fresh cache.
+# quick_calibration = false
 # startup = true
 # periodic = false
 # interval_secs = 3600

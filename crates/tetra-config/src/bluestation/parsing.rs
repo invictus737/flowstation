@@ -406,6 +406,7 @@ tx_freq = 438362500
 
 [phy_io.soapysdr.sx1255_autocal]
 enabled = true
+quick_calibration = true
 interval_secs = 1800
 allow_periodic_temperature_read = true
 temperature_sensor = "temperature"
@@ -452,6 +453,7 @@ location_area = 1
         let cfg = from_toml_str(toml).expect("parse failed");
         let autocal = &cfg.phy_io.soapysdr.as_ref().expect("soapy config").sx1255_autocal;
         assert!(autocal.enabled);
+        assert!(autocal.quick_calibration);
         assert_eq!(autocal.interval_secs, 1800);
         assert!(autocal.allow_periodic_temperature_read);
         assert_eq!(autocal.temperature_sensor.as_deref(), Some("temperature"));

@@ -11,6 +11,10 @@ use toml::Value;
 pub struct CfgSx1255Autocal {
     /// Enable the SX1255 autocalibration manager.
     pub enabled: bool,
+    /// Reuse a successful startup loopback calibration from calibration.toml.
+    pub quick_calibration: bool,
+    /// Runtime-derived path for quick calibration cache.
+    pub calibration_cache_path: Option<String>,
     /// Run non-streaming calibration/probing before RX/TX streams are activated.
     pub startup: bool,
     /// Run periodic non-disruptive checks while the BS is running.
@@ -100,6 +104,8 @@ impl Default for CfgSx1255Autocal {
     fn default() -> Self {
         Self {
             enabled: false,
+            quick_calibration: false,
+            calibration_cache_path: None,
             startup: true,
             periodic: false,
             interval_secs: 3600,
@@ -151,6 +157,8 @@ impl Default for CfgSx1255Autocal {
 #[derive(Default, Deserialize)]
 pub struct CfgSx1255AutocalDto {
     pub enabled: Option<bool>,
+    #[serde(alias = "quick-calibration")]
+    pub quick_calibration: Option<bool>,
     pub startup: Option<bool>,
     pub periodic: Option<bool>,
     pub interval_secs: Option<u64>,
@@ -200,6 +208,9 @@ pub fn apply_sx1255_autocal_patch(src: Option<CfgSx1255AutocalDto>) -> CfgSx1255
     if let Some(src) = src {
         if let Some(v) = src.enabled {
             cfg.enabled = v;
+        }
+        if let Some(v) = src.quick_calibration {
+            cfg.quick_calibration = v;
         }
         if let Some(v) = src.startup {
             cfg.startup = v;

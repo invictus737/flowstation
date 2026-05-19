@@ -1761,6 +1761,7 @@ dependencies = [
  "tetra-pdus",
  "tetra-saps",
  "tokio",
+ "toml",
  "tracing",
  "tungstenite",
  "ureq",

@@ -1,9 +1,12 @@
 use std::{
+    fs,
+    path::{Path, PathBuf},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use crate::net_telemetry::{TelemetryEvent, TelemetrySink};
+use serde::{Deserialize, Serialize};
 use soapysdr::{Args, Device, Direction};
 use tetra_config::bluestation::CfgSx1255Autocal;
 
@@ -39,6 +42,23 @@ pub struct RxStartupCompensation {
     pub image_coeff: ComplexSample,
     pub apply_dc: bool,
     pub apply_iq: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct QuickCalibrationCache {
+    version: u32,
+    source: String,
+    created_unix_secs: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rx_hz: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tx_hz: Option<f64>,
+    dc_re: f64,
+    dc_im: f64,
+    iq_re: f64,
+    iq_im: f64,
+    apply_dc: bool,
+    apply_iq: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -115,6 +135,98 @@ impl RxStartupCompensation {
     }
 }
 
+impl QuickCalibrationCache {
+    fn from_compensation(compensation: RxStartupCompensation, freqs: AutocalFrequencies) -> Self {
+        let created_unix_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default();
+
+        Self {
+            version: 1,
+            source: "sx1255_autocal".to_string(),
+            created_unix_secs,
+            rx_hz: freqs.rx_hz,
+            tx_hz: freqs.tx_hz,
+            dc_re: compensation.dc.re as f64,
+            dc_im: compensation.dc.im as f64,
+            iq_re: compensation.image_coeff.re as f64,
+            iq_im: compensation.image_coeff.im as f64,
+            apply_dc: compensation.apply_dc,
+            apply_iq: compensation.apply_iq,
+        }
+    }
+
+    fn to_compensation(&self, cfg: &CfgSx1255Autocal) -> Result<RxStartupCompensation, String> {
+        if self.version != 1 {
+            return Err(format!("unsupported cache version {}", self.version));
+        }
+        if self.source != "sx1255_autocal" {
+            return Err(format!("unexpected cache source {}", self.source));
+        }
+        for (name, value) in [
+            ("dc_re", self.dc_re),
+            ("dc_im", self.dc_im),
+            ("iq_re", self.iq_re),
+            ("iq_im", self.iq_im),
+        ] {
+            if !value.is_finite() {
+                return Err(format!("{name} is not finite"));
+            }
+        }
+
+        let mut compensation = RxStartupCompensation {
+            dc: ComplexSample {
+                re: self.dc_re as RealSample,
+                im: self.dc_im as RealSample,
+            },
+            image_coeff: ComplexSample {
+                re: self.iq_re as RealSample,
+                im: self.iq_im as RealSample,
+            },
+            apply_dc: self.apply_dc && cfg.rf_loopback_apply_dc,
+            apply_iq: self.apply_iq && cfg.rf_loopback_apply_iq,
+        };
+
+        if compensation.apply_dc && complex_abs(compensation.dc) > cfg.rf_loopback_max_dc as RealSample {
+            return Err(format!(
+                "cached DC magnitude {:.6} exceeds configured limit {:.6}",
+                complex_abs(compensation.dc),
+                cfg.rf_loopback_max_dc
+            ));
+        }
+        if compensation.apply_iq && complex_abs(compensation.image_coeff) > cfg.rf_loopback_max_image_coeff as RealSample {
+            return Err(format!(
+                "cached IQ magnitude {:.6} exceeds configured limit {:.6}",
+                complex_abs(compensation.image_coeff),
+                cfg.rf_loopback_max_image_coeff
+            ));
+        }
+
+        if !compensation.apply_dc {
+            compensation.dc = ComplexSample { re: 0.0, im: 0.0 };
+        }
+        if !compensation.apply_iq {
+            compensation.image_coeff = ComplexSample { re: 0.0, im: 0.0 };
+        }
+        if !compensation.enabled() {
+            return Err("cache contains no correction enabled by current config".to_string());
+        }
+
+        Ok(compensation)
+    }
+}
+
+fn temporary_cache_path(path: &Path) -> PathBuf {
+    let mut tmp_path = path.to_path_buf();
+    let tmp_name = path
+        .file_name()
+        .map(|name| format!("{}.tmp", name.to_string_lossy()))
+        .unwrap_or_else(|| "calibration.toml.tmp".to_string());
+    tmp_path.set_file_name(tmp_name);
+    tmp_path
+}
+
 #[derive(Clone, Debug)]
 enum TemperatureSensor {
     Device(String),
@@ -147,6 +259,7 @@ pub struct Sx1255Autocal {
     retune_blocked_logged: bool,
     periodic_temperature_blocked_logged: bool,
     rx_startup_compensation: RxStartupCompensation,
+    quick_calibration_loaded: bool,
 }
 
 impl Sx1255Autocal {
@@ -166,6 +279,7 @@ impl Sx1255Autocal {
             retune_blocked_logged: false,
             periodic_temperature_blocked_logged: false,
             rx_startup_compensation: RxStartupCompensation::default(),
+            quick_calibration_loaded: false,
         }
     }
 
@@ -206,6 +320,10 @@ impl Sx1255Autocal {
             self.probe_rf_loopback(dev, rx_ch);
         }
 
+        if self.try_load_quick_calibration(dev, rx_ch) {
+            return;
+        }
+
         if self.cfg.startup_temperature_stabilize {
             self.startup_temperature_stabilization(dev, rx_ch, tx_ch);
         } else if let Some(temp_c) = self.read_temperature(dev, rx_ch, tx_ch) {
@@ -228,6 +346,10 @@ impl Sx1255Autocal {
             return;
         }
         if !self.ensure_sxceiver() {
+            return;
+        }
+        if self.quick_calibration_loaded {
+            tracing::info!("SX1255 autocal: startup loopback calibration skipped; quick calibration cache is active");
             return;
         }
 
@@ -278,7 +400,9 @@ impl Sx1255Autocal {
         }
 
         if compensation.enabled() {
+            let selected_compensation = compensation;
             compensation = self.install_driver_compensation(dev, rx_ch, compensation);
+            self.write_quick_calibration(selected_compensation);
             if compensation.enabled() {
                 tracing::info!(
                     "SX1255 autocal: startup RX software compensation active dc=({:+.6},{:+.6}) image_coeff=({:+.6},{:+.6})",
@@ -328,6 +452,150 @@ impl Sx1255Autocal {
             self.observe_temperature(temp_c);
             self.apply_temperature_compensation(dev, rx_ch, tx_ch, temp_c, self.cfg.allow_periodic_retune, "periodic");
         }
+    }
+
+    fn try_load_quick_calibration(&mut self, dev: &Device, rx_ch: usize) -> bool {
+        if !self.cfg.quick_calibration {
+            return false;
+        }
+
+        let Some(path) = self.quick_calibration_path() else {
+            tracing::warn!("SX1255 autocal: quick_calibration=true but no calibration cache path is configured");
+            return false;
+        };
+
+        if !path.exists() {
+            tracing::info!(
+                "SX1255 autocal: quick calibration cache {} not found; running full startup calibration and creating it",
+                path.display()
+            );
+            return false;
+        }
+
+        let cache = match fs::read_to_string(&path) {
+            Ok(contents) => match toml::from_str::<QuickCalibrationCache>(&contents) {
+                Ok(cache) => cache,
+                Err(err) => {
+                    tracing::warn!(
+                        "SX1255 autocal: quick calibration cache {} is invalid TOML; running full startup calibration: {}",
+                        path.display(),
+                        err
+                    );
+                    return false;
+                }
+            },
+            Err(err) => {
+                tracing::warn!(
+                    "SX1255 autocal: failed to read quick calibration cache {}; running full startup calibration: {}",
+                    path.display(),
+                    err
+                );
+                return false;
+            }
+        };
+
+        let compensation = match cache.to_compensation(&self.cfg) {
+            Ok(compensation) => compensation,
+            Err(err) => {
+                tracing::warn!(
+                    "SX1255 autocal: quick calibration cache {} rejected; running full startup calibration: {}",
+                    path.display(),
+                    err
+                );
+                return false;
+            }
+        };
+
+        tracing::info!(
+            "SX1255 autocal: loading quick calibration cache {} dc=({:+.6},{:+.6}) iq=({:+.6},{:+.6}) apply_dc={} apply_iq={}",
+            path.display(),
+            compensation.dc.re,
+            compensation.dc.im,
+            compensation.image_coeff.re,
+            compensation.image_coeff.im,
+            compensation.apply_dc,
+            compensation.apply_iq
+        );
+
+        let remaining = self.install_driver_compensation(dev, rx_ch, compensation);
+        if remaining.enabled() {
+            tracing::info!(
+                "SX1255 autocal: quick calibration software fallback active dc=({:+.6},{:+.6}) image_coeff=({:+.6},{:+.6})",
+                remaining.dc.re,
+                remaining.dc.im,
+                remaining.image_coeff.re,
+                remaining.image_coeff.im
+            );
+            self.rx_startup_compensation = remaining;
+        } else {
+            tracing::info!("SX1255 autocal: quick calibration installed in driver; software fallback disabled");
+        }
+        self.quick_calibration_loaded = true;
+        true
+    }
+
+    fn write_quick_calibration(&self, compensation: RxStartupCompensation) {
+        if !self.cfg.quick_calibration || !compensation.enabled() {
+            return;
+        }
+
+        let Some(path) = self.quick_calibration_path() else {
+            tracing::warn!("SX1255 autocal: quick_calibration=true but no calibration cache path is configured; cache not written");
+            return;
+        };
+        let cache = QuickCalibrationCache::from_compensation(compensation, self.freqs);
+        let contents = match toml::to_string_pretty(&cache) {
+            Ok(contents) => contents,
+            Err(err) => {
+                tracing::warn!("SX1255 autocal: failed to serialize quick calibration cache: {}", err);
+                return;
+            }
+        };
+
+        if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+            if let Err(err) = fs::create_dir_all(parent) {
+                tracing::warn!(
+                    "SX1255 autocal: failed to create calibration cache directory {}: {}",
+                    parent.display(),
+                    err
+                );
+                return;
+            }
+        }
+
+        let tmp_path = temporary_cache_path(&path);
+        if let Err(err) = fs::write(&tmp_path, contents) {
+            tracing::warn!(
+                "SX1255 autocal: failed to write temporary quick calibration cache {}: {}",
+                tmp_path.display(),
+                err
+            );
+            return;
+        }
+        if let Err(err) = fs::rename(&tmp_path, &path) {
+            tracing::warn!(
+                "SX1255 autocal: failed to install quick calibration cache {}: {}",
+                path.display(),
+                err
+            );
+            let _ = fs::remove_file(&tmp_path);
+            return;
+        }
+
+        tracing::info!(
+            "SX1255 autocal: wrote quick calibration cache {} dc=({:+.6},{:+.6}) iq=({:+.6},{:+.6}) apply_dc={} apply_iq={}",
+            path.display(),
+            compensation.dc.re,
+            compensation.dc.im,
+            compensation.image_coeff.re,
+            compensation.image_coeff.im,
+            compensation.apply_dc,
+            compensation.apply_iq
+        );
+    }
+
+    fn quick_calibration_path(&self) -> Option<PathBuf> {
+        self.cfg.calibration_cache_path.as_deref().map(PathBuf::from)
     }
 
     fn startup_temperature_stabilization(&mut self, dev: &Device, rx_ch: usize, tx_ch: usize) {
@@ -2080,6 +2348,75 @@ mod tests {
         assert_eq!(clamp_frequency_correction(438_000_000.0, 1.0, 5_000.0), 438.0);
         assert_eq!(clamp_frequency_correction(438_000_000.0, 100.0, 5_000.0), 5_000.0);
         assert_eq!(clamp_frequency_correction(438_000_000.0, -100.0, 5_000.0), -5_000.0);
+    }
+
+    #[test]
+    fn quick_calibration_cache_roundtrips_selected_compensation() {
+        let cfg = CfgSx1255Autocal {
+            quick_calibration: true,
+            ..CfgSx1255Autocal::default()
+        };
+        let selected = RxStartupCompensation {
+            dc: ComplexSample {
+                re: 0.00125,
+                im: -0.0025,
+            },
+            image_coeff: ComplexSample {
+                re: -0.45,
+                im: 0.31,
+            },
+            apply_dc: true,
+            apply_iq: true,
+        };
+
+        let cache = QuickCalibrationCache::from_compensation(
+            selected,
+            AutocalFrequencies {
+                rx_hz: Some(431_362_500.0),
+                tx_hz: Some(438_362_500.0),
+            },
+        );
+        let serialized = toml::to_string(&cache).expect("serialize cache");
+        let parsed: QuickCalibrationCache = toml::from_str(&serialized).expect("parse cache");
+        let restored = parsed.to_compensation(&cfg).expect("restore compensation");
+
+        assert!(restored.apply_dc);
+        assert!(restored.apply_iq);
+        assert!((restored.dc.re - selected.dc.re).abs() < 1.0e-7);
+        assert!((restored.dc.im - selected.dc.im).abs() < 1.0e-7);
+        assert!((restored.image_coeff.re - selected.image_coeff.re).abs() < 1.0e-7);
+        assert!((restored.image_coeff.im - selected.image_coeff.im).abs() < 1.0e-7);
+    }
+
+    #[test]
+    fn quick_calibration_cache_respects_current_apply_flags() {
+        let cfg = CfgSx1255Autocal {
+            rf_loopback_apply_iq: false,
+            ..CfgSx1255Autocal::default()
+        };
+        let cache = QuickCalibrationCache::from_compensation(
+            RxStartupCompensation {
+                dc: ComplexSample {
+                    re: 0.001,
+                    im: -0.002,
+                },
+                image_coeff: ComplexSample {
+                    re: 0.25,
+                    im: 0.25,
+                },
+                apply_dc: true,
+                apply_iq: true,
+            },
+            AutocalFrequencies {
+                rx_hz: None,
+                tx_hz: None,
+            },
+        );
+
+        let restored = cache.to_compensation(&cfg).expect("restore compensation");
+        assert!(restored.apply_dc);
+        assert!(!restored.apply_iq);
+        assert_eq!(restored.image_coeff, ComplexSample { re: 0.0, im: 0.0 });
     }
 
     #[test]

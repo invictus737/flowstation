@@ -1,6 +1,7 @@
 use clap::Parser;
 use crossbeam_channel;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -40,6 +41,19 @@ fn load_config_from_toml(cfg_path: &str) -> StackConfig {
             println!("Failed to load configuration from {}: {}", cfg_path, e);
             std::process::exit(1);
         }
+    }
+}
+
+fn attach_runtime_config_paths(cfg: &mut StackConfig, cfg_path: &str) {
+    let config_path = Path::new(cfg_path);
+    let config_dir = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let calibration_path = config_dir.join("calibration.toml");
+
+    if let Some(soapy_cfg) = cfg.phy_io.soapysdr.as_mut() {
+        soapy_cfg.sx1255_autocal.calibration_cache_path = Some(calibration_path.to_string_lossy().into_owned());
     }
 }
 
@@ -202,7 +216,8 @@ fn main() {
     let args = Args::parse();
 
     // Build immutable, cheaply clonable SharedConfig and build the base station stack
-    let stack_cfg = load_config_from_toml(&args.config);
+    let mut stack_cfg = load_config_from_toml(&args.config);
+    attach_runtime_config_paths(&mut stack_cfg, &args.config);
     let mut cfg = SharedConfig::from_parts(stack_cfg, None);
 
     // If dashboard is enabled, set up log capture channel BEFORE logging initialises
