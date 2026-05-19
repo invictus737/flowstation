@@ -224,6 +224,10 @@ impl SoapyIo {
             // RX is enabled
             match rx.read(&mut [buffer], 1000000) {
                 Ok(len) => {
+                    if len == 0 {
+                        tracing::warn!("SoapySDR: RX read returned zero samples");
+                        return Err(RxTxDevError::RxReadError);
+                    }
                     self.sx1255_autocal.rx_startup_compensation().apply(&mut buffer[..len]);
 
                     // Get timestamp, set initial time if not yet set

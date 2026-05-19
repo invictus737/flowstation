@@ -35,6 +35,7 @@ pub struct PhyBs<D: RxTxDev> {
     control: Option<ControlEndpoint>,
 
     tick: u64,
+    consecutive_rxtx_errors: u32,
 }
 
 impl<D: RxTxDev> PhyBs<D> {
@@ -73,6 +74,7 @@ impl<D: RxTxDev> PhyBs<D> {
             rxtxdev,
             control,
             tick: 0,
+            consecutive_rxtx_errors: 0,
         }
     }
 
@@ -152,7 +154,10 @@ impl<D: RxTxDev> PhyBs<D> {
         let rssi = burst.rssi_dbfs;
         match train_seq {
             TrainingSequence::NormalTrainSeq1 => {
-                assert!(burst.bits.len() == NUB_BITS);
+                if burst.bits.len() != NUB_BITS {
+                    tracing::warn!("PHY: dropping NormalTrainSeq1 burst with invalid length {}", burst.bits.len());
+                    return;
+                }
 
                 let mut blk = BitBuffer::new(NUB_BLK_BITS * 2);
                 blk.copy_bits_from_bitarr(&burst.bits[NUB_BLK1_OFFSET..NUB_BLK1_OFFSET + NUB_BLK_BITS]);
@@ -163,7 +168,10 @@ impl<D: RxTxDev> PhyBs<D> {
             }
 
             TrainingSequence::NormalTrainSeq2 => {
-                assert!(burst.bits.len() == NUB_BITS);
+                if burst.bits.len() != NUB_BITS {
+                    tracing::warn!("PHY: dropping NormalTrainSeq2 burst with invalid length {}", burst.bits.len());
+                    return;
+                }
 
                 let blk1 = BitBuffer::from_bitarr(&burst.bits[NUB_BLK1_OFFSET..NUB_BLK1_OFFSET + NUB_BLK_BITS]);
                 let blk2 = BitBuffer::from_bitarr(&burst.bits[NUB_BLK2_OFFSET..NUB_BLK2_OFFSET + NUB_BLK_BITS]);
@@ -172,7 +180,10 @@ impl<D: RxTxDev> PhyBs<D> {
                 Self::send_rxblock_to_lmac(queue, train_seq, BurstType::NUB, PhyBlockType::NUB, PhyBlockNum::Block2, blk2, rssi);
             }
             TrainingSequence::ExtendedTrainSeq => {
-                assert!(burst.bits.len() == CUB_BITS);
+                if burst.bits.len() != CUB_BITS {
+                    tracing::warn!("PHY: dropping ExtendedTrainSeq burst with invalid length {}", burst.bits.len());
+                    return;
+                }
 
                 let mut blk = BitBuffer::new(CUB_BLK_BITS * 2);
                 blk.copy_bits_from_bitarr(&burst.bits[CUB_BLK1_OFFSET..CUB_BLK1_OFFSET + CUB_BLK_BITS]);
@@ -182,7 +193,9 @@ impl<D: RxTxDev> PhyBs<D> {
                 Self::send_rxblock_to_lmac(queue, train_seq, BurstType::CUB, PhyBlockType::SSN1, PhyBlockNum::Block1, blk, rssi);
             }
 
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
+            other => {
+                tracing::warn!("PHY: dropping unsupported RX training sequence {:?}", other);
+            }
         }
     }
 
@@ -205,21 +218,30 @@ impl<D: RxTxDev> PhyBs<D> {
             dl_input_file.read_block(&mut dl_burst).expect("Failed to read dl_input_file data");
         } else {
             // We received data from LMAC, convert BBK block to bitarr
-            assert!(prim.bbk.is_some());
             let mut bbk = [0u8; 30];
-            prim.bbk.unwrap().to_bitarr(&mut bbk);
+            let Some(mut bbk_src) = prim.bbk else {
+                tracing::warn!("PHY: dropping TX burst without BBK");
+                return;
+            };
+            bbk_src.to_bitarr(&mut bbk);
 
             // Build NDB or SDB burst
             dl_burst = match prim.burst_type {
                 BurstType::SDB => {
                     // SDB burst
-                    assert!(prim.train_type == TrainingSequence::SyncTrainSeq);
-                    assert!(prim.blk1.is_some() && prim.blk2.is_some());
+                    if prim.train_type != TrainingSequence::SyncTrainSeq {
+                        tracing::warn!("PHY: dropping SDB with unsupported training sequence {:?}", prim.train_type);
+                        return;
+                    }
+                    let (Some(mut blk1_src), Some(mut blk2_src)) = (prim.blk1, prim.blk2) else {
+                        tracing::warn!("PHY: dropping SDB missing blk1/blk2");
+                        return;
+                    };
 
                     let mut blk1 = [0u8; 120];
                     let mut blk2 = [0u8; 216];
-                    prim.blk1.unwrap().to_bitarr(&mut blk1); // Guaranteed for SDB
-                    prim.blk2.unwrap().to_bitarr(&mut blk2); // Guaranteed for SDB
+                    blk1_src.to_bitarr(&mut blk1);
+                    blk2_src.to_bitarr(&mut blk2);
 
                     slotter::build_sdb(&blk1, &bbk, &blk2)
                 }
@@ -230,16 +252,24 @@ impl<D: RxTxDev> PhyBs<D> {
                     match prim.train_type {
                         TrainingSequence::NormalTrainSeq1 => {
                             // Single large block
-                            assert!(prim.blk1.is_some() && prim.blk2.is_none());
-                            let mut blk1_src = prim.blk1.unwrap(); // Guaranteed for NDB
+                            let Some(mut blk1_src) = prim.blk1 else {
+                                tracing::warn!("PHY: dropping NDB NormalTrainSeq1 missing blk1");
+                                return;
+                            };
+                            if prim.blk2.is_some() {
+                                tracing::warn!("PHY: NDB NormalTrainSeq1 received unexpected blk2; ignoring duplicate block");
+                            }
                             blk1_src.to_bitarr(&mut blk1);
                             blk1_src.to_bitarr(&mut blk2);
                         }
                         TrainingSequence::NormalTrainSeq2 => {
                             // Two half slots
-                            assert!(prim.blk1.is_some() && prim.blk2.is_some());
-                            prim.blk1.unwrap().to_bitarr(&mut blk1); // Guaranteed for NDB
-                            prim.blk2.unwrap().to_bitarr(&mut blk2); // Guaranteed for NDB trainseq 2
+                            let (Some(mut blk1_src), Some(mut blk2_src)) = (prim.blk1, prim.blk2) else {
+                                tracing::warn!("PHY: dropping NDB NormalTrainSeq2 missing blk1/blk2");
+                                return;
+                            };
+                            blk1_src.to_bitarr(&mut blk1);
+                            blk2_src.to_bitarr(&mut blk2);
                         }
                         _ => {
                             tracing::warn!("PHY: unsupported training sequence {:?} for NDB burst, dropping", prim.train_type);
@@ -249,7 +279,10 @@ impl<D: RxTxDev> PhyBs<D> {
 
                     slotter::build_ndb(prim.train_type, &blk1, &bbk, &blk2)
                 }
-                _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
+                other => {
+                    tracing::warn!("PHY: unsupported TX burst type {:?}, dropping", other);
+                    return;
+                }
             };
         }
 
@@ -268,7 +301,27 @@ impl<D: RxTxDev> PhyBs<D> {
         // Transmit slot and receive rx data (if any trainseq was found)
         // This function is blocking and the source of timing sync in the whole stack
         // let tick_done = std::time::Instant::now();
-        let rx = self.rxtxdev.rxtx_timeslot(&tx_slot).expect("Got error from rxtx_timeslot");
+        let rx = match self.rxtxdev.rxtx_timeslot(&tx_slot) {
+            Ok(rx) => {
+                if self.consecutive_rxtx_errors != 0 {
+                    tracing::info!(
+                        "PHY: rxtx_timeslot recovered after {} consecutive error(s)",
+                        self.consecutive_rxtx_errors
+                    );
+                }
+                self.consecutive_rxtx_errors = 0;
+                rx
+            }
+            Err(err) => {
+                self.consecutive_rxtx_errors = self.consecutive_rxtx_errors.saturating_add(1);
+                tracing::error!(
+                    "PHY: rxtx_timeslot failed ({:?}), dropping this TDMA slot; consecutive_errors={}",
+                    err,
+                    self.consecutive_rxtx_errors
+                );
+                return;
+            }
+        };
         // let new_tick_start = std::time::Instant::now();
         // let elapsed = new_tick_start.duration_since(tick_done);
         // tracing::debug!("rxtx_timeslot: tick_done {:?}, new_tick_start {:?}, elapsed {:?}", tick_done, new_tick_start, elapsed);

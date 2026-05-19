@@ -1164,7 +1164,9 @@ impl UmacBs {
                     const STCH_CAP: usize = 124;
 
                     let usage_marker = prim.chan_alloc.as_ref().and_then(|ca| ca.usage);
-                    let has_pending_ra = self.channel_scheduler.take_pending_ra_ack(ts, prim.main_address.ssi);
+                    let has_pending_ra = self.take_recent_random_access_response(&prim.main_address)
+                        || (prim.main_address.ssi_type == SsiType::Issi
+                            && self.channel_scheduler.take_pending_ra_ack(ts, prim.main_address.ssi));
                     let mut mac_pdu = MacResource {
                         fill_bits: false,
                         pos_of_grant: 0,

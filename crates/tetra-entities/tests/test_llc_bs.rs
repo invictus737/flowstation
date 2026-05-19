@@ -3,8 +3,9 @@ mod common;
 use common::ComponentTest;
 use tetra_config::bluestation::StackMode;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, debug};
+use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, TxReporter, TxState, debug};
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
+use tetra_saps::tla::TlaTlDataReqBl;
 use tetra_saps::tma::TmaUnitdataInd;
 
 #[test]
@@ -51,4 +52,41 @@ fn test_udata_with_broken_mm_payload() {
     // Evaluate results
     assert_eq!(sink_msgs.len(), 1);
     tracing::warn!("Validation of result not implemented");
+}
+
+#[test]
+fn test_unsupported_acked_stch_marks_reporter_discarded() {
+    debug::setup_logging_verbose();
+
+    let reporter = TxReporter::new();
+    let receipt = reporter.clone();
+    let test_sapmsg = SapMsg {
+        sap: Sap::TlaSap,
+        src: TetraEntity::Mle,
+        dest: TetraEntity::Llc,
+        msg: SapMsgInner::TlaTlDataReqBl(TlaTlDataReqBl {
+            main_address: TetraAddress::issi(2260082),
+            link_id: 0,
+            endpoint_id: 0,
+            tl_sdu: BitBuffer::from_bitstr("10101010"),
+            stealing_permission: true,
+            subscriber_class: 0,
+            fcs_flag: false,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_class_info: None,
+            req_handle: 0,
+            graceful_degradation: None,
+            chan_alloc: None,
+            tx_reporter: Some(reporter),
+        }),
+    };
+
+    let mut test = ComponentTest::new(StackMode::Bs, None);
+    test.populate_entities(vec![TetraEntity::Llc], vec![TetraEntity::Umac]);
+    test.submit_message(test_sapmsg);
+    test.run_stack(Some(1));
+
+    assert_eq!(receipt.get_state(), TxState::Discarded);
+    assert!(test.dump_sinks().is_empty());
 }

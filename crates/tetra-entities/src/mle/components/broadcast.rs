@@ -51,7 +51,7 @@ impl MleBroadcast {
     fn determine_next_broadcast_type(&self) -> BroadcastType {
         match self.last_broadcast_type {
             BroadcastType::None => {
-                if self.time_broadcast.is_some() {
+                if self.time_broadcast.is_some() || !self.config.config().cell.neighbor_cells_ca.is_empty() {
                     BroadcastType::NetworkTime
                 } else {
                     BroadcastType::None
@@ -62,9 +62,7 @@ impl MleBroadcast {
     }
 
     fn send_d_nwrk_broadcast(&self, queue: &mut MessageQueue) {
-        // Timezone is validated at config parse time, so encode cannot fail here
-        let tz = self.time_broadcast.as_deref().unwrap();
-        let time_value = network_time::encode_tetra_network_time(tz).unwrap();
+        let time_value = self.time_broadcast.as_deref().and_then(network_time::encode_tetra_network_time);
 
         // ============================================================
         // PDU #1 — Time-only broadcast (no neighbours).
@@ -77,14 +75,16 @@ impl MleBroadcast {
         // neighbour PDU (below) is rejected for any reason (e.g.
         // misconfigured cell_identifier_ca, MCC/MNC mismatch, etc.).
         // ============================================================
-        let pdu_time_only = DNwrkBroadcast {
-            cell_re_select_parameters: 0,
-            cell_load_ca: 0,
-            tetra_network_time: Some(time_value),
-            number_of_ca_neighbour_cells: Some(0),
-            neighbour_cell_information_for_ca: Vec::new(),
-        };
-        self.transmit_pdu(queue, pdu_time_only, "time-only");
+        if let Some(time_value) = time_value {
+            let pdu_time_only = DNwrkBroadcast {
+                cell_re_select_parameters: 0,
+                cell_load_ca: 0,
+                tetra_network_time: Some(time_value),
+                number_of_ca_neighbour_cells: Some(0),
+                neighbour_cell_information_for_ca: Vec::new(),
+            };
+            self.transmit_pdu(queue, pdu_time_only, "time-only");
+        }
 
         // ============================================================
         // PDU #2 — Neighbour info broadcast (only if neighbours configured).
@@ -123,7 +123,7 @@ impl MleBroadcast {
             let pdu_with_neighbours = DNwrkBroadcast {
                 cell_re_select_parameters: 0,
                 cell_load_ca: 0,
-                tetra_network_time: Some(time_value),
+                tetra_network_time: time_value,
                 number_of_ca_neighbour_cells: Some(neighbour_count),
                 neighbour_cell_information_for_ca: neighbour_cells,
             };
@@ -131,9 +131,11 @@ impl MleBroadcast {
         }
 
         tracing::info!(
-            "D-NWRK-BROADCAST sent (tz={}, time=0x{:012X}, dual={})",
-            tz,
-            time_value,
+            "D-NWRK-BROADCAST sent (tz={:?}, time={}, neighbours={})",
+            self.time_broadcast,
+            time_value
+                .map(|value| format!("0x{value:012X}"))
+                .unwrap_or_else(|| "disabled".to_string()),
             !cfg.cell.neighbor_cells_ca.is_empty()
         );
     }

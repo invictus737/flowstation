@@ -767,6 +767,11 @@ impl MmBs {
             if !self.client_mgr.client_is_known(issi) {
                 // Client unknown (e.g. never registered via location update).
                 // Re-register so group attachment can proceed.
+                if !self.config.config().security.is_issi_allowed(issi) {
+                    tracing::warn!("MM: ISSI {} not in whitelist, rejecting group attach registration", issi);
+                    self.send_d_attach_detach_ack_reject(queue, issi, prim.handle);
+                    return;
+                }
                 match self.client_mgr.try_register_client(issi, true) {
                     Ok(_) => {
                         self.config.state_write().subscribers.register(issi);

@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::{MessageQueue, TetraEntityTrait};
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
-use tetra_core::{BitBuffer, Layer2Service, Sap, SsiType, TdmaTime, TetraAddress, TxReporter, unimplemented_log};
+use tetra_core::{BitBuffer, Layer2Service, Sap, SsiType, TdmaTime, TetraAddress, TxReporter, TxState, unimplemented_log};
 use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
 use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
 use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
@@ -260,10 +260,12 @@ impl Llc {
 
         if prim.stealing_permission {
             tracing::error!("LLC: BL-DATA requested for STCH message (stealing_permission=true) — not supported, dropping");
+            Self::discard_unsupported_tx_reporter(prim.tx_reporter.take(), "STCH BL-DATA");
             return;
         }
         if prim.main_address.ssi_type == SsiType::Gssi {
             tracing::error!("LLC: BL-DATA requested for GSSI-addressed message — not supported, dropping");
+            Self::discard_unsupported_tx_reporter(prim.tx_reporter.take(), "GSSI BL-DATA");
             return;
         }
 
@@ -636,12 +638,40 @@ impl Llc {
                     ack.addr.ssi,
                     ack.ns
                 );
-                ack.tx_reporter.mark_lost();
+                match ack.tx_reporter.get_state() {
+                    TxState::Transmitted => ack.tx_reporter.mark_lost(),
+                    TxState::Discarded => {
+                        tracing::warn!(
+                            "schedule_retransmissions: SSI {} N(S) {} expired after repeated UMAC discards; leaving reporter discarded",
+                            ack.addr.ssi,
+                            ack.ns
+                        );
+                    }
+                    state => {
+                        tracing::warn!(
+                            "schedule_retransmissions: SSI {} N(S) {} expired in unexpected reporter state {:?}",
+                            ack.addr.ssi,
+                            ack.ns,
+                            state
+                        );
+                    }
+                }
             }
             // The ack expires here
         }
 
         had_activity
+    }
+
+    fn discard_unsupported_tx_reporter(tx_reporter: Option<TxReporter>, reason: &str) {
+        let Some(tx_reporter) = tx_reporter else {
+            return;
+        };
+
+        match tx_reporter.get_state() {
+            TxState::Pending => tx_reporter.mark_discarded(),
+            state => tracing::warn!("LLC: {reason} dropped with reporter already in state {:?}", state),
+        }
     }
 
     fn submit_free_messages_to_umac(&mut self, queue: &mut MessageQueue) -> bool {

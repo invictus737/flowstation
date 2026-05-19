@@ -18,7 +18,10 @@ impl From<u16> for PreCodedStatus {
         match x {
             0 => PreCodedStatus::Emergency,
             1..=31742 => PreCodedStatus::Reserved(x),
-            31743..=32767 => PreCodedStatus::SdsTl(SdsShortReport::from_u16(x).unwrap()),
+            31743..=32767 => match SdsShortReport::from_u16(x) {
+                Ok(report) => PreCodedStatus::SdsTl(report),
+                Err(_) => PreCodedStatus::Reserved(x),
+            },
             32768..=65535 => PreCodedStatus::NetworkUserSpecific(x),
         }
     }
@@ -50,5 +53,22 @@ impl core::fmt::Display for PreCodedStatus {
             PreCodedStatus::SdsTl(x) => write!(f, "SdsTl({})", x),
             PreCodedStatus::NetworkUserSpecific(x) => write!(f, "NetworkUserSpecific({})", x),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_all_raw_values_without_panic() {
+        for raw in 0..=u16::MAX {
+            let _ = PreCodedStatus::from(raw);
+        }
+    }
+
+    #[test]
+    fn invalid_sds_tl_prefix_is_reserved() {
+        assert_eq!(PreCodedStatus::from(31743), PreCodedStatus::Reserved(31743));
     }
 }

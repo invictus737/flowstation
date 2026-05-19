@@ -29,6 +29,7 @@ const DC_ATTEMPT_REL_TOLERANCE: RealSample = 0.50;
 const TEMPERATURE_VALID_MIN_C: f64 = -40.0;
 const TEMPERATURE_VALID_MAX_C: f64 = 125.0;
 const LOOPBACK_TX_PREFILL_BLOCKS: usize = 8;
+const QUICK_CACHE_FREQ_TOLERANCE_HZ: f64 = 1.0;
 
 #[derive(Clone, Copy, Debug)]
 pub struct AutocalFrequencies {
@@ -157,13 +158,15 @@ impl QuickCalibrationCache {
         }
     }
 
-    fn to_compensation(&self, cfg: &CfgSx1255Autocal) -> Result<RxStartupCompensation, String> {
+    fn to_compensation(&self, cfg: &CfgSx1255Autocal, current_freqs: AutocalFrequencies) -> Result<RxStartupCompensation, String> {
         if self.version != 1 {
             return Err(format!("unsupported cache version {}", self.version));
         }
         if self.source != "sx1255_autocal" {
             return Err(format!("unexpected cache source {}", self.source));
         }
+        validate_cached_frequency("RX", self.rx_hz, current_freqs.rx_hz)?;
+        validate_cached_frequency("TX", self.tx_hz, current_freqs.tx_hz)?;
         for (name, value) in [
             ("dc_re", self.dc_re),
             ("dc_im", self.dc_im),
@@ -320,15 +323,15 @@ impl Sx1255Autocal {
             self.probe_rf_loopback(dev, rx_ch);
         }
 
-        if self.try_load_quick_calibration(dev, rx_ch) {
-            return;
-        }
-
         if self.cfg.startup_temperature_stabilize {
             self.startup_temperature_stabilization(dev, rx_ch, tx_ch);
         } else if let Some(temp_c) = self.read_temperature(dev, rx_ch, tx_ch) {
             self.observe_temperature(temp_c);
             self.apply_temperature_compensation(dev, rx_ch, tx_ch, temp_c, true, "startup");
+        }
+
+        if self.try_load_quick_calibration(dev, rx_ch) {
+            return;
         }
     }
 
@@ -494,7 +497,7 @@ impl Sx1255Autocal {
             }
         };
 
-        let compensation = match cache.to_compensation(&self.cfg) {
+        let compensation = match cache.to_compensation(&self.cfg, self.freqs) {
             Ok(compensation) => compensation,
             Err(err) => {
                 tracing::warn!(
@@ -1633,8 +1636,30 @@ fn prefer_latest_stabilized_compensation(
 fn repeated_iq_required_inliers(total_attempts: usize) -> usize {
     if total_attempts <= 1 {
         1
+    } else if total_attempts == 2 {
+        2
     } else {
         total_attempts.saturating_mul(2).div_ceil(3).max(3)
+    }
+}
+
+fn validate_cached_frequency(label: &str, cached: Option<f64>, current: Option<f64>) -> Result<(), String> {
+    match (cached, current) {
+        (Some(cached), Some(current)) => {
+            if !cached.is_finite() || !current.is_finite() {
+                return Err(format!("{label} frequency is not finite"));
+            }
+            let delta = (cached - current).abs();
+            if delta <= QUICK_CACHE_FREQ_TOLERANCE_HZ {
+                Ok(())
+            } else {
+                Err(format!(
+                    "{label} frequency mismatch cached={cached:.3} current={current:.3} delta={delta:.3} Hz"
+                ))
+            }
+        }
+        (None, None) => Ok(()),
+        (cached, current) => Err(format!("{label} frequency presence mismatch cached={cached:?} current={current:?}")),
     }
 }
 
@@ -2356,7 +2381,11 @@ mod tests {
         );
         let serialized = toml::to_string(&cache).expect("serialize cache");
         let parsed: QuickCalibrationCache = toml::from_str(&serialized).expect("parse cache");
-        let restored = parsed.to_compensation(&cfg).expect("restore compensation");
+        let freqs = AutocalFrequencies {
+            rx_hz: Some(431_362_500.0),
+            tx_hz: Some(438_362_500.0),
+        };
+        let restored = parsed.to_compensation(&cfg, freqs).expect("restore compensation");
 
         assert!(restored.apply_dc);
         assert!(restored.apply_iq);
@@ -2382,10 +2411,78 @@ mod tests {
             AutocalFrequencies { rx_hz: None, tx_hz: None },
         );
 
-        let restored = cache.to_compensation(&cfg).expect("restore compensation");
+        let restored = cache
+            .to_compensation(&cfg, AutocalFrequencies { rx_hz: None, tx_hz: None })
+            .expect("restore compensation");
         assert!(restored.apply_dc);
         assert!(!restored.apply_iq);
         assert_eq!(restored.image_coeff, ComplexSample { re: 0.0, im: 0.0 });
+    }
+
+    #[test]
+    fn quick_calibration_cache_rejects_frequency_mismatch() {
+        let cfg = CfgSx1255Autocal::default();
+        let cache = QuickCalibrationCache::from_compensation(
+            RxStartupCompensation {
+                dc: ComplexSample { re: 0.001, im: -0.002 },
+                image_coeff: ComplexSample { re: 0.25, im: 0.25 },
+                apply_dc: true,
+                apply_iq: true,
+            },
+            AutocalFrequencies {
+                rx_hz: Some(431_362_500.0),
+                tx_hz: Some(438_362_500.0),
+            },
+        );
+
+        let err = cache
+            .to_compensation(
+                &cfg,
+                AutocalFrequencies {
+                    rx_hz: Some(431_362_502.0),
+                    tx_hz: Some(438_362_500.0),
+                },
+            )
+            .expect_err("cache must be rejected after a frequency change");
+        assert!(err.contains("RX frequency mismatch"));
+    }
+
+    #[test]
+    fn quick_calibration_cache_rejects_nonfinite_and_over_limit_values() {
+        let cfg = CfgSx1255Autocal::default();
+        let freqs = AutocalFrequencies { rx_hz: None, tx_hz: None };
+        let mut cache = QuickCalibrationCache::from_compensation(
+            RxStartupCompensation {
+                dc: ComplexSample { re: 0.001, im: -0.002 },
+                image_coeff: ComplexSample { re: 0.25, im: 0.25 },
+                apply_dc: true,
+                apply_iq: true,
+            },
+            freqs,
+        );
+
+        cache.dc_re = f64::NAN;
+        assert!(
+            cache
+                .to_compensation(&cfg, freqs)
+                .expect_err("NaN must be rejected")
+                .contains("not finite")
+        );
+
+        cache.dc_re = (cfg.rf_loopback_max_dc * 2.0) as f64;
+        assert!(
+            cache
+                .to_compensation(&cfg, freqs)
+                .expect_err("oversized DC correction must be rejected")
+                .contains("cached DC magnitude")
+        );
+    }
+
+    #[test]
+    fn repeated_iq_calibration_two_attempts_requires_two_inliers() {
+        assert_eq!(repeated_iq_required_inliers(1), 1);
+        assert_eq!(repeated_iq_required_inliers(2), 2);
+        assert_eq!(repeated_iq_required_inliers(3), 3);
     }
 
     #[test]
