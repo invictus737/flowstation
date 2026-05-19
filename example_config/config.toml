@@ -1,424 +1,293 @@
-# FlowStation TETRA configuration file
-# DO NOT START without editing to comply with the legal limits in your jurisdiction
+# TETRA BlueStation example configuration file
+# This is an example configuration file for the TETRA base station stack
+# DO NOT RUN without editing to stay within legal limits of your jurisdiction
 
 config_version = "0.6"
 
-# Stack operating mode: "Bs" (Base Station), "Ms" (Mobile Station), or "Mon" (Monitor)
+# Stack operation mode: "Bs" (Base Station), "Ms" (Mobile Station), or "Mon" (Monitor)
 stack_mode = "Bs"
 
-# Uncomment to enable verbose logging. Files grow fast and generate additional load.
+# Uncomment to record debug log. Files get large quickly and generate additional system load
 # debug_log = "./verbose_log.txt"
 
 ###############################################################################
 
+# PHY layer i/o configuration
+
 [phy_io]
 
-# Input type: set to SoapySdr.
+# Input type: set to SoapySdr. May allow for future non-soapy RF backends.
 backend = "SoapySdr"
 
-# DEBUG/TEST CODE. Capture files grow fast.
-# dl_tx_file = "./dl_output.bin"    # Debug; uncomment to save generated DL RF samples
-# ul_rx_file = "./ul_output.bin"    # Debug; uncomment to save received UL RF samples
+# DEBUG/TESTING code. Capture files get large quickly.
+# dl_tx_file = "./dl_output.bin"    # Debugging; uncomment to save generated DL RF samples to file
+# ul_rx_file = "./ul_output.bin"    # Debugging; uncomment to save received UL RF samples to file
 
 [phy_io.soapysdr]
-# Transmit tx(dl) and receive rx(ul) frequencies in Hz
-# !!! Make sure to also edit the corresponding fields in the cell_info section.
-tx_freq = 438025000
-rx_freq = 433025000
-
-# Adjust if your SDR has a non-negligible tuning error
-# ppm_err = 0.0
+# Transmit tx(dl) and rx(ul) frequencies in Hz
+# !!! Make sure to also edit all related fields in the cell_info section to fit this frequency.
+tx_freq = 438362500
+rx_freq = 431362500
+ppm_err = 0                       # Adjust if your SDR has a non-negligible tuning error
 
 ################################################################################################
-## OPTIONAL: specific device, antenna, gain selection                                        ##
-## Check your device with SoapySDRUtil --probe                                               ##
-## or: https://github.com/MidnightBlueLabs/tetra-bluestation-docs/wiki/03-Configuration     ##
+## OPTIONAL: specific device, antenna, gain selection                                         ##
+## Make sure to check your device for valid settings using SoapySDRUtil --probe               ##
+## or check: https://github.com/MidnightBlueLabs/tetra-bluestation-docs/wiki/03-Configuration ##
 ################################################################################################
 
 # Optional device selection arguments.
-# If not specified, the first compatible device found is selected automatically.
+# If not specified, the first supported device found is selected automatically.
+# You may need to specify this if you have multiple supported device connected,
+# or if your device cannot be automatically detected by enumeration.
+# For example, to use a Pluto+ with a given IP address:
 # device = "driver=plutosdr,uri=ip:192.168.42.42"
 # device = "driver=lime,serial=123456789"
 
-# Optional antenna selection (overrides device defaults)
+# Optional antenna selection to override device-specific defaults
+# Check antenna names with SoapySDRUtil --probe
 # rx_antenna = "LNAW"
 # tx_antenna = "BAND2"
 
-# Optional gain values (override device defaults)
+# Optional gain values to override device-specific defaults.
 # Check valid gain names with SoapySDRUtil --probe
 # tx_gain_pad = 50.0
+# tx_gain_iamp = 3.0
+# tx_gain_pga = 35.0
+# tx_gain_dac = 3.0
+# tx_gain_mixer = 10.0
+# tx_gain_dac = 3.0
+# tx_gain_mixer = 44.0
+# tx_gain_dac = 3.0
+# tx_gain_mixer = 10.0
 # rx_gain_lna = 30.0
+# rx_gain_tia = 6.0
+# rx_gain_pga = 8.0
 
 ###############################################################################
-# OPTIONAL: SX1255 / SoapySX autocalibration and drift guard
+
+# SX1255 / SoapySX startup calibration (FlowStation v0.1.4-mod)
 #
-# This is intentionally conservative. Startup calibration runs before normal
-# RX/TX streams are activated. Periodic checks are disabled by default because
-# SX1255 temperature measurement shares the RX ADC path on current hardware.
-#
-# Temperature-based retune is disabled until you provide a board-specific
-# temp_ppm_per_c coefficient. On SXceiver boards with a 38.4 MHz 0.5 ppm TCXO,
-# keep max_frequency_correction_hz small unless external RF measurement proves
-# otherwise. Leave allow_periodic_retune=false unless you have validated that
-# small active-stream retunes are acceptable on your station.
-#
-# [phy_io.soapysdr.sx1255_autocal]
-# enabled = true
-# Reuse the last successful startup loopback calibration from calibration.toml
-# next to this config file. If the file is missing or invalid, FlowStation runs
-# the full startup calibration and writes a fresh cache.
-# quick_calibration = false
-# startup = true
-# periodic = false
-# interval_secs = 3600
-#
-# Try SoapySDR device/channel sensors named like temperature/temp/sx1255_temp.
-# If your driver exposes a known exact key, set it here.
-# read_temperature = false
-# Periodic temperature reads are off by default because SX1255 temperature
-# measurement may share the RX ADC path. Set true only after validating that
-# your SoapySX driver/hardware can tolerate the scheduled measurement.
-# allow_periodic_temperature_read = false
-# temperature_sensor = "temperature"
-# temperature_sensor_keys = ["temperature", "temp", "sx1255_temperature", "sx1255_temp"]
-#
-# Optional startup-only warm-up. This uses only the SX1255 SoapySDR temperature
-# sensor before normal RX/TX streams are activated. It intentionally delays BS
-# startup until the board temperature is near stable, or until max wait expires.
-# startup_temperature_stabilize = false
-# startup_temperature_interval_secs = 10
-# startup_temperature_min_wait_secs = 60
-# startup_temperature_max_wait_secs = 300
-# startup_temperature_stable_delta_c = 0.5
-# startup_temperature_stable_checks = 3
-#
-# First successful reading becomes baseline unless reference_temperature_c is set.
-# min_temperature_delta_c = 2.0
-# reference_temperature_c = 25.0
-#
-# Frequency compensation. 0.0 disables retuning.
-# temp_ppm_per_c = 0.0
-# min_frequency_step_hz = 25.0
-# max_frequency_correction_hz = 300.0
-# allow_periodic_retune = false
-#
-# Generic SoapySDR correction hooks. Used only if the driver reports support.
-# enable_dc_offset_mode = true
-# rf_loopback_startup_check = true
-# rf_filter_profile = "TETRA_CLEAN"
-#
-# Startup RF loopback calibration. FlowStation transmits a short internal LB
-# tone, estimates RX DC and image leakage, and installs correction in the
-# enhanced SoapySX driver when available. If the driver lacks the API, it falls
-# back to software correction in FlowStation.
-# rf_loopback_startup_calibration = true
-# rf_loopback_tone_hz = 24000.0
-# rf_loopback_tone_amplitude = 0.35
-# rf_loopback_settle_blocks = 24
-# rf_loopback_capture_blocks = 32
-# rf_loopback_calibration_attempts = 1
-# rf_loopback_retry_delay_secs = 10
-# Optional temporary TX gains used only during loopback calibration. This lets
-# live TX stay low for desense testing while the internal LB tone remains strong.
-# rf_loopback_tx_gains = { DAC = 9.0, MIXER = 30.0 }
-# rf_loopback_min_snr_db = 20.0
-# rf_loopback_max_image_coeff = 0.95
-# rf_loopback_max_dc = 0.5
-# rf_loopback_apply_dc = true
-# rf_loopback_apply_iq = true
-###############################################################################
+# Uses only the SX1255 SoapySDR temperature sensor before normal RX/TX streams
+# start. Periodic temperature reads stay disabled because the SX sensor uses the
+# RX ADC path on this board. Live TX stays low for desense testing; loopback
+# calibration temporarily raises TX gain and restores the live gain afterwards.
+[phy_io.soapysdr.sx1255_autocal]
+enabled = true
+quick_calibration = true
+startup = true
+periodic = false
+interval_secs = 3600
+read_temperature = true
+allow_periodic_temperature_read = false
+temperature_sensor = "temperature"
+startup_temperature_stabilize = true
+startup_temperature_interval_secs = 10
+startup_temperature_min_wait_secs = 60
+startup_temperature_max_wait_secs = 240
+startup_temperature_stable_delta_c = 0.4
+startup_temperature_stable_checks = 3
+min_temperature_delta_c = 1.0
+temperature_reference_c = 52.0
+temperature_reference_raw = 176.6
+temp_ppm_per_c = 0.0
+min_frequency_step_hz = 25.0
+max_frequency_correction_hz = 300.0
+allow_periodic_retune = false
+enable_dc_offset_mode = true
+rf_loopback_startup_check = true
+rf_filter_profile = ""
+rf_loopback_startup_calibration = true
+rf_loopback_tone_hz = 24000.0
+rf_loopback_tone_amplitude = 0.20
+rf_loopback_settle_blocks = 24
+rf_loopback_capture_blocks = 32
+rf_loopback_calibration_attempts = 6
+rf_loopback_retry_delay_secs = 10
+rf_loopback_tx_gains = { DAC = 3.0, MIXER = 10.0 }
+rf_loopback_min_snr_db = 20.0
+rf_loopback_max_image_coeff = 0.95
+rf_loopback_max_dc = 0.5
+rf_loopback_apply_dc = true
+rf_loopback_apply_iq = true
 
 ###############################################################################
 
 [net_info]
 # Mobile Country Code (MCC) - identifies your country
-mcc = 204  # Netherlands
+mcc = 901
 
 # Mobile Network Code (MNC) - identifies the TETRA network
-# MAKE SURE THE MNC CAN BE USED, CONSULT RELEVANT AUTHORITIES IF NECESSARY
-mnc = 1337
+# MAKE SURE MNC MAY BE USED, CONSULT RELEVANT AUTHORITIES IF NEEDED
+mnc = 9999
 
-###############################################################################
-
+# Cell Information
 [cell_info]
 
+# These parameters specify the DL and UL frequencies
+# Read the spec if in doubt. Make sure these match the tx/rx freqs as given above
 # See ETSI TS 100 392-15 V1.5.1 Clause 6: Duplex spacing
-freq_band = 4                       # 400MHz band
-main_carrier = 1521                 # + 1521 * 25kHz = 38250kHz
-duplex_spacing = 4                  # Use 5MHz spacing between ul and dl (for 400 MHz band)
-# custom_duplex_spacing = 7600000   # Do not uncomment unless you have programmed a custom duplex spacing entry in your radios
-freq_offset = 0                     # Carrier offset. Usually 0. Options: 0, 6250, -6250, 12500 Hz.
+freq_band = 4
+main_carrier = 1534
+duplex_spacing = 1
+# custom_duplex_spacing = 7600000   # Don't uncomment unless you have programmed a custom duplex spacing entry in your radios
+freq_offset = 12500                     # Offset from carrier. Usually 0. Options: 0, 6250, -6250, 12500.
 reverse_operation = false           # False: UL below DL. True: UL above DL.
 
-# Location area identifier
+# Location Area identifier
 location_area = 2
 
-# Colour code (0-63), helps distinguish adjacent cells on the same frequency
+# Colour code (0-63), helps distinguish between adjacent cells on the same frequency
 colour_code = 1
-
-# IANA timezone for time broadcasting via D-NWRK-BROADCAST. When set, the BS will
-# broadcast UTC time and local time offset once per hyperframe (~61s) so that
-# radios can synchronize their clocks. Daylight saving time is handled automatically.
-# timezone = "Europe/Bucharest"
-
-###############################################################################
-# OPTIONAL: Home Mode Display (PID 220)
-#
-# Periodically broadcasts a text string to all MSs on the cell via D-SDS-DATA.
-# The MS displays this text on its home screen (e.g. base station callsign).
-# Enabled by the presence of this sub-section; remove to disable.
-#
-# [cell_info.home_mode_display]
-# source_issi = 16777215          # ISSI shown as sender on the radio (default: 16777215)
-# interval_multiframes = 96       # Broadcast interval (1 MF ≈ 1s; default: 96 ≈ 96s)
-# protocol_id = 220               # SDS protocol ID for Home Mode Display (default: 220)
-# text_coding_scheme = "LATIN"    # "LATIN" = ISO-8859-1, "UTF16" = UCS-2/UTF-16BE
-# text = "FlowStation"            # Text shown on radio display
-###############################################################################
-
-###############################################################################
-# OPTIONAL: Supplemental SDS broadcast (FlowStation)
-#
-# A second periodic SDS broadcast sent alongside the Home Mode Display (PID 220).
-# Uses the same mechanism but with a configurable protocol ID and text.
-# Useful for sending additional data to radios that support custom PIDs.
-# Enabled by the presence of this sub-section; remove to disable.
-#
-# [cell_info.sds_broadcast]
-# source_issi = 16777215          # ISSI shown as sender on the radio (default: 0)
-# interval_multiframes = 96       # Broadcast interval (1 MF ≈ 1s; default: 96 ≈ 96s)
-# protocol_id = 130               # SDS protocol ID (default: 220 — change to avoid conflict)
-# text_coding_scheme = "LATIN"    # "LATIN" = ISO-8859-1, "UTF16" = UCS-2/UTF-16BE
-# text = "YO6RZV"                 # Text payload to broadcast
-###############################################################################
-
-###############################################################################
-# OPTIONAL: Remote control via U-STATUS (FlowStation)
-#
-# Allows authorized radios to trigger BS actions remotely by sending a U-STATUS
-# message to ISSI 9999 (the BS control address) from the radio menu.
-# Only ISSIs listed in authorized_issis can trigger commands.
-# Unrecognized status codes from authorized radios are silently ignored.
-# Enabled by the presence of this sub-section; remove to disable.
-#
-# Available actions:
-#   "restart"   — restarts the FlowStation service (equivalent to systemctl restart tetra)
-#   "shutdown"  — stops the FlowStation service (must be restarted manually or via systemd)
-#   "kick_all"  — deregisters all currently registered terminals; they re-attach immediately
-#
-# [cell_info.sds_command_control]
-# authorized_issis = [2260570, 2260571]   # ISSIs allowed to send commands
-#
-# [[cell_info.sds_command_control.commands]]
-# status_code = 32001             # U-STATUS code sent from the radio to ISSI 9999
-# action = "restart"
-#
-# [[cell_info.sds_command_control.commands]]
-# status_code = 32002
-# action = "shutdown"
-#
-# [[cell_info.sds_command_control.commands]]
-# status_code = 32003
-# action = "kick_all"
-###############################################################################
-
-# Local SSI ranges for this cell. Traffic for these ranges will not leave the cell.
-# Overrides any settings in the brew section, if enabled.
-# Incoming brew traffic on these ranges will also be rejected.
-# The end of the range is INCLUSIVE — the end number IS in the range.
-local_ssi_ranges = [
-    [0, 90],
-]
 
 ###############################################################################
 
 # OPTIONAL: Additional cell parameters
+# WIP; uncomment and configure as needed, many are not currently implemented,
+# defaults should be fine
 
-# neighbor_cell_broadcast = 0
-# late_entry_supported = true
-# subscriber_class = 0xFFFF
+# Neighbor cell broadcast settings
+neighbor_cell_broadcast = 1
+
+# Cell load (Channel Allocation) - current load
+# cell_load_ca = 0
+
+# Late entry support - allows joining ongoing group calls
+#late_entry_supported = true
+
+# Subscriber class - defines which MS classes can access this cell
+#subscriber_class = 0xFFFF
+
+# Registration and mobility features
 # registration = true
 # deregistration = true
+# Disable BS-initiated periodic re-registration. This mirrors the stable 0.5.9
+# behavior and avoids terminal service drops when a forced T351 refresh is missed.
+periodic_registration_secs = 3600
 # priority_cell = false
 # no_minimum_mode = false
 # migration = false
 
-system_wide_services = true  # If false, radios will operate in fallback mode (ignored when Brew is enabled)
+# Service availability flags
+system_wide_services = true  # If false, radios will operate in fallback mode (ignored when Brew enabled)
 voice_service = true
 # circuit_mode_data_service = true
 # sndcp_service = true
 # aie_service = false
 # advanced_link = false
 
-# system_code = 0
+# System code (0-15) - identifies the TETRA system version
+system_code = 3
+
+# Sharing mode for the main control channel
 # sharing_mode = 0
+
+# Reserved frames for time slot allocation
 # ts_reserved_frames = 0
+
+# Discontinuous Transmission (DTX) on user plane
 # u_plane_dtx = false
+
+# Frame 18 extension support
 # frame_18_ext = false
-# ms_txpwr_max_cell = 4
 
-# Group call hangtime in seconds.
-# How long the circuit of an inactive group call stays open after the last speaker
-# releases the floor, before the call is disconnected.
-# During hangtime, any MS can resume the floor without a new D-SETUP/D-CONNECT cycle.
-# Default: 5 seconds. Valid range: 0–300.
-# hangtime_secs = 5
+# IANA timezone for D-NWRK-BROADCAST time broadcasting. When set, the BS will
+# broadcast UTC time and local time offset once per hyperframe (~61s) so MSs
+# can synchronize their clocks. Handles DST automatically.
+timezone = "Europe/Bucharest"
 
-# Maximum active call duration in seconds — ETSI EN 300 392-2 §14.9.1 T310 equivalent (FlowStation).
-# After this time the BS sends D-RELEASE regardless of call activity.
-# 0 = no limit (infinite — call runs until U-DISCONNECT or hangtime).
-# Default: 120. Valid range: 30–86400, or 0 for no limit.
-# call_timeout_secs = 120
+# Local SSI ranges for this cell. Traffic for these ranges will not leave the cell
+# This overrides any settings in brew section, if enabled.
+# Also, incoming brew traffic on those rangges will be dropped
+# Range end is exclusive, so the range end number is NOT inside the ranges
+local_ssi_ranges = [
+    [0, 90]
+]
 
-# UL inactivity timeout in seconds: if no voice frames are received from the transmitting
-# MS during this time, the BS forces TX-CEASED and enters hangtime.
-# Must be greater than T.213 (1s) to tolerate DTX and short RF fading.
-# Default: 3 seconds. Valid range: 1–30.
-# ul_inactivity_secs = 3
-
-# Periodic registration interval in seconds — ETSI T351 equivalent (FlowStation).
-# MS must re-register within this interval or be automatically deregistered by the BS.
-# The BS signals this via D-LOCATION-UPDATE-ACCEPT (PeriodicLocationUpdating).
-# On expiry: D-LOCATION-UPDATE-REJECT (ExpiryOfTimer) is sent; terminal re-attaches immediately.
-# 0 = disabled — registrations never expire.
-# Default: 3600 (1 hour). Valid range when non-zero: 60–86400.
-# periodic_registration_secs = 3600
 
 ###############################################################################
 
-# OPTIONAL: Neighbor cells for cell reselection (ETSI EN 300 392-2 Clause 18.5.17)
-#
-# Rules: max 7 entries, unique cell_identifier_ca and main_carrier_number per entry.
-# Set neighbor_cell_broadcast = 2 in [cell_info] when using this section.
-#
-# [[cell_info.neighbor_cells_ca]]
-# cell_identifier_ca = 1
-# cell_reselection_types_supported = 0   # 0=non-sync only, 1=sync only, 2=both
-# neighbor_cell_synchronized = false     # true only if cells share a GPS reference
-# cell_load_ca = 0                       # 0=unknown, 1=low, 2=medium, 3=high
-# main_carrier_number = 1522
-# mcc = 204
-# mnc = 1337
-# location_area = 3
-
-###############################################################################
-
-# OPTIONAL: ISSI access control — whitelist (FlowStation)
-#
-# When issi_whitelist is non-empty, only listed ISSIs can register.
-# All others receive D-LOCATION-UPDATE-REJECT and cannot make or receive calls.
-# Leave empty or omit the section entirely to accept any terminal (open network).
-#
-# [security]
-# issi_whitelist = [2260571, 2260572, 2260575]
-
-###############################################################################
-
-# OPTIONAL: SS-TPI identity / mnemonic-name support (FlowStation)
-#
-# When enabled, FlowStation attaches an SS-TPI INFORM Facility IE to supported
-# call-control PDUs so compatible terminals can display the current talking party.
-#
-# Lookup policy is intentionally conservative:
-# - manual entries always win;
-# - cached results are reused;
-# - RadioID is optional and disabled by default;
-# - remote lookup happens only at call setup or speaker/floor changes, never for
-#   traffic/audio frames.
-#
-# Mnemonic names are limited to 15 ASCII characters for the first implementation.
-# If no mnemonic is available, SS-TPI still carries the speaker SSI.
-#
-# [identity]
-# enabled = true
-#
-# Emit mnemonicName in SS-TPI INFORM when available and allowed.
-# Set to false if you want SS-TPI identity-only operation.
-# emit_mnemonic_name = true
-#
-# Local policy switch for terminals/subscribers allowed to receive mnemonic names.
-# subscription_allows_mnemonic = true
-#
-# Cache TTL for successful identity lookups.
-# cache_ttl_secs = 86400
-#
-# Cache TTL for misses/failed remote lookups. Keeps RadioID retries bounded.
-# negative_cache_ttl_secs = 3600
-#
-# Maximum in-memory identity cache entries.
-# cache_max_entries = 10000
-#
-# Manual overrides. Use these for known local ISSIs and for names that must not
-# depend on an external service.
-#
-# [[identity.manual]]
-# ssi = 2260571
-# mnemonic = "YO6RZV"
-# label = "Razvan"
-#
-# [[identity.manual]]
-# ssi = 2260572
-# mnemonic = "YO6TETRA"
-# label = "Local test radio"
-#
-# Optional RadioID.net lookup. Keep disabled unless you explicitly want remote
-# lookups. Use a clear User-Agent with contact info for your deployment.
-#
-# [identity.radioid]
-# enabled = false
-# endpoint = "https://radioid.net/api/dmr/user/"
-# timeout_secs = 3
-# min_lookup_interval_ms = 1000
-# user_agent = "FlowStation/0.1 contact:admin@example.org"
-# api_token = ""
-
-###############################################################################
-
-# OPTIONAL: Web dashboard — accessible at http://<BTS-IP>:8080 (FlowStation)
-#
-# Live view of terminals, active calls, log, config editor, kick and SDS.
-#
-# [dashboard]
-# port = 8080
-
-###############################################################################
-
-# Brew Protocol: Connect to TetraPack/BrandMeister server via TETRA Homebrew Protocol.
-# All groups that radios affiliate to are transmitted to Brew as affiliations.
-# Uncomment this section to automatically enable the Brew entity.
+# Brew protocol: Connect to TetraPack/BrandMeister server via TETRA Homebrew Protocol.
+# All groups that radios attach to are forwarded to Brew as affiliations.
+# Uncomment this section to automatically load and use Brew entity
 # See: https://wiki.tetrapack.online/books/tetra/page/brew
 
-# [brew]
+[brew]
 
-# Server address
-# host = "core.tetraflow.ro"
-# port = 9000
+# TetraPack
+host = "core.tetrapack.online"
+port = 443
+
+# Tetra-Core
+#host = "core.tetralink.ro"
+#port = 443
 
 # Use TLS (wss:// / https://)
-# tls = true
+tls = true
 
-# HTTP Digest authentication credentials, registered in BrandMeister.
+# HTTP Digest auth credentials, as registered in BrandMeister
 # Username should be your SSID (DMR ID + 2-digit suffix).
 # Password is your BrandMeister hotspot password.
-# username = 123456700
-# password = "012345"
+username = 0
+password = "CHANGE_ME"
 
-# Reconnect delay (seconds)
-# reconnect_delay_secs = 15
+# Reconnection delay (seconds)
+reconnect_delay_secs = 5
 
-# Additional initial latency in frames for inbound Brew jitter playback.
-# Default: 0. Increase if you hear audio artifacts at the start of transmissions.
+# Optional: additional initial latency compensation in frames for inbound Brew jitter playout.
+# Adaptive jitter buffering is always enabled; this adds fixed startup delay if needed.
 # jitter_initial_latency_frames = 0
 
-# Enable SDS forwarding between local clients and Brew. Enabled by default.
-# feature_sds_enabled = true
+# Enable SDS forwarding between local and Brew clients. Enabled by default.
+feature_sds_enabled = true
 
-# Export RSSI measurements to the Brew server as Service (0xf4) JSON messages.
-# Disabled by default. Enable if your Brew server supports RSSI data ingestion.
-# When enabled, each radio's signal level is sent at most once every 5 seconds.
-# Format: {"issi": 2260570, "rssi_dbfs": -42.3}
-# feature_rssi_export = false
-
-# Uncomment to allow only calls for selected SSIs to be forwarded through Brew.
-# If left commented, all calls (outside local_ssi_ranges) are allowed through Brew.
+# Uncomment to allow only calls for select SSIs to be transmitted over Brew
+# SDS works for all SSIs, currently, but the SDS over Brew feature may be fully disabled.
+# If left commented, all (outside of local_ssi_ranges) calls are allowed over Brew
 # whitelisted_ssis = [91]
+
+###############################################################################
+
+# OPTIONAL: Web dashboard — local-only by default at http://127.0.0.1:8080 (FlowStation)
+#
+# Live view of terminals, active calls and log. Config editing and control commands
+# are opt-in because configs may contain secrets and control can stop the service.
+#
+[dashboard]
+port = 8080
+bind = "0.0.0.0"
+allow_config_api = false
+allow_control_commands = false
+# auth_token = "change-me-to-a-long-random-token"
+
+###############################################################################
+
+# SS-TPI identity / mnemonic-name support (FlowStation v0.1.4-mod)
+#
+# Lookup is cached and performed only at call setup or speaker/floor changes,
+# never per audio frame.
+[identity]
+enabled = true
+emit_mnemonic_name = true
+subscription_allows_mnemonic = true
+cache_ttl_secs = 86400
+negative_cache_ttl_secs = 3600
+cache_max_entries = 10000
+
+[[identity.manual]]
+ssi = 2260082
+mnemonic = "YO3TCO"
+label = "Cristian"
+
+[[identity.manual]]
+ssi = 2260616
+mnemonic = "YO3TCO"
+label = "Cristian"
+
+[identity.radioid]
+enabled = false
+endpoint = "https://radioid.net/api/dmr/user/"
+timeout_secs = 3
+min_lookup_interval_ms = 1000
+user_agent = "FlowStation/0.1.7-mod contact:local"
+api_token = "CHANGE_ME"
