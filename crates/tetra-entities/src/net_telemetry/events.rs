@@ -32,7 +32,12 @@ pub enum TelemetryEvent {
     /// Speaker changed on active group call
     GroupCallSpeakerChanged { call_id: u16, gssi: u32, speaker_issi: u32 },
     /// Individual (P2P) call started
-    IndividualCallStarted { call_id: u16, calling_issi: u32, called_issi: u32, simplex: bool },
+    IndividualCallStarted {
+        call_id: u16,
+        calling_issi: u32,
+        called_issi: u32,
+        simplex: bool,
+    },
     /// Individual call ended
     IndividualCallEnded { call_id: u16 },
     /// Energy saving mode updated for MS (0=StayAlive, 1=Eg1..7=Eg7)

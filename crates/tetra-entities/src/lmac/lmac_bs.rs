@@ -161,14 +161,17 @@ impl LmacBs {
                                 LogicalChannel::TchS
                             }
                         } else {
-                            tracing::warn!("LMAC: NUB/NormalTrainSeq2 unexpected block_num {:?}, treating as Stch", blk.block_num);
+                            tracing::warn!(
+                                "LMAC: NUB/NormalTrainSeq2 unexpected block_num {:?}, treating as Stch",
+                                blk.block_num
+                            );
                             LogicalChannel::Stch
                         }
                     }
-                    _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+                    _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
                 }
             }
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
         }
     }
 
@@ -256,7 +259,10 @@ impl LmacBs {
     fn rx_tp_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
         tracing::debug!("rx_tp_prim: msg {:?}", message);
 
-        let SapMsgInner::TpUnitdataInd(prim) = message.msg else { tracing::error!("BUG: unexpected message or state -- routing error"); return; };
+        let SapMsgInner::TpUnitdataInd(prim) = message.msg else {
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
         let ts_idx = msg_dltime.t as usize - 1;
@@ -269,7 +275,10 @@ impl LmacBs {
             self.blk2_stolen = false;
         }
         if pchan != PhysicalChannel::Tp && self.blk2_stolen {
-            tracing::warn!("lmac_bs: blk2_stolen set on non-traffic burst (pchan={:?}), resetting — likely late STCH after circuit close", pchan);
+            tracing::warn!(
+                "lmac_bs: blk2_stolen set on non-traffic burst (pchan={:?}), resetting — likely late STCH after circuit close",
+                pchan
+            );
             self.blk2_stolen = false;
             return;
         }
@@ -283,15 +292,17 @@ impl LmacBs {
                 self.rx_blk_control(queue, prim, lchan);
             }
             _ => {
-                    tracing::error!("BUG: unexpected message or state -- routing error"); return;
-                }
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
+            }
         }
     }
 
     fn rx_tmv_configure_req(&mut self, _queue: &mut MessageQueue, message: SapMsg) {
         let SapMsgInner::TmvConfigureReq(prim) = &message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
         if let Some(stolen) = prim.blk2_stolen {
             self.blk2_stolen = stolen;
         }
@@ -301,8 +312,9 @@ impl LmacBs {
     fn rx_tmv_unitdata_req_slot(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::debug!("rx_tmv_unitdata_req_slot");
         let SapMsgInner::TmvUnitdataReq(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         // Update per-timeslot UL physical channel indicator
         let ts_idx = prim.ts.t as usize - 1;
@@ -352,7 +364,10 @@ impl LmacBs {
                 (BurstType::NDB, TrainingSequence::NormalTrainSeq2)
             }
             _ => {
-                tracing::warn!("LMAC: unsupported logical channel {:?} in rx_tmv_unitdata_req_slot, dropping", blk1.logical_channel);
+                tracing::warn!(
+                    "LMAC: unsupported logical channel {:?} in rx_tmv_unitdata_req_slot, dropping",
+                    blk1.logical_channel
+                );
                 return;
             }
         };
@@ -404,7 +419,8 @@ impl LmacBs {
             //     self.rx_control(queue, message);
             // }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }
@@ -449,7 +465,7 @@ impl TetraEntityTrait for LmacBs {
             // Sap::Control => {
             //     self.rx_control(queue, message);
             // }
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
         }
     }
 

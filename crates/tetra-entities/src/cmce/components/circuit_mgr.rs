@@ -74,7 +74,10 @@ impl CircuitMgr {
             Direction::Ul => {
                 let dl_is_both = if let Some(dl) = &self.dl[ts as usize - 1] {
                     if self.ul_only[ts as usize - 1].is_some() {
-                        tracing::warn!("CMCE: circuit_mgr ts={} has both dl and ul_only set simultaneously (invariant violation)", ts);
+                        tracing::warn!(
+                            "CMCE: circuit_mgr ts={} has both dl and ul_only set simultaneously (invariant violation)",
+                            ts
+                        );
                     }
                     dl.direction == Direction::Both
                 } else {
@@ -272,7 +275,7 @@ impl CircuitMgr {
                 let circuit = self.ul_only[ts as usize - 1].take();
                 circuit.ok_or(CircuitErr::CircuitNotActive)
             }
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
         }
     }
 
@@ -303,7 +306,7 @@ impl CircuitMgr {
                 self.ul_only[ts as usize - 1] = Some(circuit);
                 Ok(self.ul_only[ts as usize - 1].as_ref().unwrap())
             }
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
         }
     }
 
@@ -360,7 +363,9 @@ impl CircuitMgr {
                     // Already closed by normal release path racing with the expiry timer — safe to ignore.
                     tracing::debug!(
                         "circuit_mgr: expiry close skipped for call_id={} ts={} dir={:?} (already closed)",
-                        call_id, ts, dir
+                        call_id,
+                        ts,
+                        dir
                     );
                 }
             }

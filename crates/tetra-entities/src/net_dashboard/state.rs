@@ -10,14 +10,14 @@ pub struct MsState {
     pub rssi_dbfs: Option<f32>,
     pub registered_at: u64,
     pub last_seen_secs_ago: u64,
-    pub energy_saving_mode: u8,   // 0=StayAlive, 1=Eg1..7=Eg7
+    pub energy_saving_mode: u8, // 0=StayAlive, 1=Eg1..7=Eg7
 }
 
 /// Active call state
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CallState {
     pub call_id: u16,
-    pub call_type: &'static str,  // "group" or "individual"
+    pub call_type: &'static str, // "group" or "individual"
     pub gssi: u32,
     pub caller_issi: u32,
     pub called_issi: u32,
@@ -37,10 +37,10 @@ pub struct LogEntry {
 /// Last Heard entry — one entry per call start or SDS activity
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LastHeardEntry {
-    pub ts: String,           // HH:MM:SS timestamp
-    pub issi: u32,            // source ISSI
-    pub activity: String,     // "call_group", "call_individual", "sds"
-    pub dest: u32,            // destination GSSI or ISSI (0 if unknown)
+    pub ts: String,       // HH:MM:SS timestamp
+    pub issi: u32,        // source ISSI
+    pub activity: String, // "call_group", "call_individual", "sds"
+    pub dest: u32,        // destination GSSI or ISSI (0 if unknown)
 }
 
 /// Shared mutable state for the dashboard, protected by RwLock
@@ -118,30 +118,36 @@ impl DashboardStateInner {
     }
 
     pub fn snapshot_ms(&self) -> Vec<MsState> {
-        self.ms_map.values().map(|e| MsState {
-            issi: e.issi,
-            groups: e.groups.clone(),
-            rssi_dbfs: e.rssi_dbfs,
-            registered_at: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs()
-                .saturating_sub(e.registered_at.elapsed().as_secs()),
-            last_seen_secs_ago: e.last_seen.elapsed().as_secs(),
-            energy_saving_mode: e.energy_saving_mode,
-        }).collect()
+        self.ms_map
+            .values()
+            .map(|e| MsState {
+                issi: e.issi,
+                groups: e.groups.clone(),
+                rssi_dbfs: e.rssi_dbfs,
+                registered_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs()
+                    .saturating_sub(e.registered_at.elapsed().as_secs()),
+                last_seen_secs_ago: e.last_seen.elapsed().as_secs(),
+                energy_saving_mode: e.energy_saving_mode,
+            })
+            .collect()
     }
 
     pub fn snapshot_calls(&self) -> Vec<CallState> {
-        self.calls.values().map(|c| CallState {
-            call_id: c.call_id,
-            call_type: if c.is_group { "group" } else { "individual" },
-            gssi: c.gssi,
-            caller_issi: c.caller_issi,
-            called_issi: c.called_issi,
-            active_speaker: c.speaker_issi,
-            started_secs_ago: c.started_at.elapsed().as_secs(),
-            simplex: c.simplex,
-        }).collect()
+        self.calls
+            .values()
+            .map(|c| CallState {
+                call_id: c.call_id,
+                call_type: if c.is_group { "group" } else { "individual" },
+                gssi: c.gssi,
+                caller_issi: c.caller_issi,
+                called_issi: c.called_issi,
+                active_speaker: c.speaker_issi,
+                started_secs_ago: c.started_at.elapsed().as_secs(),
+                simplex: c.simplex,
+            })
+            .collect()
     }
 }

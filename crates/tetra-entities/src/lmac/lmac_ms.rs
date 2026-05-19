@@ -198,7 +198,10 @@ impl LmacMs {
     fn rx_tp_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
         tracing::debug!("rx_tp_prim: time: {:?} msg {:?}", self.ts, message);
 
-        let SapMsgInner::TpUnitdataInd(prim) = message.msg else { tracing::error!("BUG: unexpected message or state -- routing error"); return; };
+        let SapMsgInner::TpUnitdataInd(prim) = message.msg else {
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
         let lchan = self.determine_logical_channel_dl(&prim, self.ts.as_ref().unwrap_or(&TdmaTime::default()));
 
         match lchan {
@@ -217,8 +220,9 @@ impl LmacMs {
     fn rx_tmv_configure_req(&mut self, _queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_tmv_configure_req");
         let SapMsgInner::TmvConfigureReq(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         if let Some(time) = prim.time {
             self.ts = Some(time);
@@ -247,7 +251,8 @@ impl LmacMs {
                 unimplemented_log!("TmvUnitdataReq")
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }
@@ -270,7 +275,8 @@ impl TetraEntityTrait for LmacMs {
                 self.rx_tmv_prim(queue, message);
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }

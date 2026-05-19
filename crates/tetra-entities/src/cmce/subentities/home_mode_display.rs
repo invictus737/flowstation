@@ -36,8 +36,7 @@ impl HomeModeDisplaySender {
     const MAX_SDS_TYPE4_BYTES: usize = 255; // 2040 bits max when byte-aligned
     const SDS_TL_TRANSFER_HEADER_BYTES: usize = 3;
     const HOME_MODE_TEXT_CODING_SCHEME_BYTES: usize = 1;
-    const MAX_TEXT_BYTES: usize =
-        Self::MAX_SDS_TYPE4_BYTES - Self::SDS_TL_TRANSFER_HEADER_BYTES - Self::HOME_MODE_TEXT_CODING_SCHEME_BYTES;
+    const MAX_TEXT_BYTES: usize = Self::MAX_SDS_TYPE4_BYTES - Self::SDS_TL_TRANSFER_HEADER_BYTES - Self::HOME_MODE_TEXT_CODING_SCHEME_BYTES;
 
     pub fn new() -> Self {
         Self {
@@ -88,15 +87,15 @@ impl HomeModeDisplaySender {
 
         // Startup delay: wait before first broadcast
         let start_time = self.start_time.get_or_insert(dltime);
-        let start_delay_slots =
-            Self::HOME_MODE_START_DELAY_FRAMES.saturating_mul(Self::SLOTS_PER_FRAME).min(i32::MAX as u32) as i32;
+        let start_delay_slots = Self::HOME_MODE_START_DELAY_FRAMES
+            .saturating_mul(Self::SLOTS_PER_FRAME)
+            .min(i32::MAX as u32) as i32;
         if start_time.age(dltime) < start_delay_slots {
             return None;
         }
 
         // Interval check
-        let interval_slots =
-            interval_multiframes.saturating_mul(Self::SLOTS_PER_MULTIFRAME).min(i32::MAX as u32) as i32;
+        let interval_slots = interval_multiframes.saturating_mul(Self::SLOTS_PER_MULTIFRAME).min(i32::MAX as u32) as i32;
         let should_send = match self.last_tx {
             None => true,
             Some(last_tx) => last_tx.age(dltime) >= interval_slots,

@@ -238,14 +238,7 @@ impl CcBsSubentity {
             }
         };
 
-        self.fsm_on_u_connect(
-            queue,
-            prim.received_tetra_address,
-            prim.handle,
-            prim.link_id,
-            prim.endpoint_id,
-            pdu,
-        );
+        self.fsm_on_u_connect(queue, prim.received_tetra_address, prim.handle, prim.link_id, prim.endpoint_id, pdu);
     }
 
     pub(super) fn rx_u_info(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {

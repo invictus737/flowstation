@@ -194,7 +194,8 @@ impl Llc {
                 self.rx_tma_report_ind(queue, message);
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }
@@ -202,8 +203,9 @@ impl Llc {
     fn rx_tla_tlunitdata_req_bl(&mut self, _queue: &mut MessageQueue, message: SapMsg) {
         tracing::trace!("rx_tla_tlunitdata_req_bl");
         let SapMsgInner::TlaTlUnitdataReqBl(mut prim) = message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let mut pdu_buf = BitBuffer::new_autoexpand(32);
         let pdu = BlUdata { has_fcs: false };
@@ -252,8 +254,9 @@ impl Llc {
     fn rx_tla_tldata_req_bl(&mut self, _queue: &mut MessageQueue, message: SapMsg) {
         tracing::trace!("rx_tla_tldata_req_bl");
         let SapMsgInner::TlaTlDataReqBl(mut prim) = message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         if prim.stealing_permission {
             tracing::error!("LLC: BL-DATA requested for STCH message (stealing_permission=true) — not supported, dropping");
@@ -303,7 +306,9 @@ impl Llc {
 
         // Derive the timeslot from chan_alloc (first set timeslot in [bool;4]), defaulting to 1.
         // Must be done before chan_alloc is moved into TmaUnitdataReq below.
-        let derived_ts: u8 = prim.chan_alloc.as_ref()
+        let derived_ts: u8 = prim
+            .chan_alloc
+            .as_ref()
             .and_then(|ca| ca.timeslots.iter().enumerate().find(|&(_, &set)| set).map(|(i, _)| (i + 1) as u8))
             .unwrap_or(1);
 
@@ -357,7 +362,9 @@ impl Llc {
             SapMsgInner::TlaTlUnitdataReqBl(_) => {
                 self.rx_tla_tlunitdata_req_bl(queue, message);
             }
-            _ => { tracing::warn!("unhandled match variant, ignoring"); }
+            _ => {
+                tracing::warn!("unhandled match variant, ignoring");
+            }
         }
     }
 
@@ -389,7 +396,8 @@ impl Llc {
 
             pdu_type
         } else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
 
         // Call handler function
@@ -416,7 +424,8 @@ impl Llc {
             }
 
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }
@@ -426,7 +435,8 @@ impl Llc {
 
         // Get header bits (again) and prepare MLE message
         let SapMsgInner::TmaUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
         let Some(mut pdu) = prim.pdu.take() else {
             tracing::warn!("LLC: rx_tma_unitdata_ind_bl received message with no pdu, ignoring");
@@ -484,7 +494,8 @@ impl Llc {
                 }
             },
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         };
 
@@ -788,7 +799,9 @@ impl TetraEntityTrait for Llc {
             Sap::TlaSap => {
                 self.rx_tla_prim(queue, message);
             }
-            _ => { tracing::warn!("unhandled match variant, ignoring"); }
+            _ => {
+                tracing::warn!("unhandled match variant, ignoring");
+            }
         }
     }
 

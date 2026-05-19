@@ -27,16 +27,13 @@ fn encode_tetra_network_time_inner(now_utc: chrono::DateTime<Utc>, tz: chrono_tz
     // ambiguitate interna, ceea ce bloca silentios tot broadcast-ul.
     // .earliest() returneaza intotdeauna Some(...) pentru date UTC valide.
     let year = now_utc.year();
-    let year_start = Utc
-        .with_ymd_and_hms(year, 1, 1, 0, 0, 0)
-        .earliest()
-        .unwrap_or_else(|| {
-            tracing::error!(
-                "encode_tetra_network_time: failed to compute year_start for year {}, using epoch fallback",
-                year
-            );
-            chrono::DateTime::UNIX_EPOCH.with_timezone(&Utc)
-        });
+    let year_start = Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0).earliest().unwrap_or_else(|| {
+        tracing::error!(
+            "encode_tetra_network_time: failed to compute year_start for year {}, using epoch fallback",
+            year
+        );
+        chrono::DateTime::UNIX_EPOCH.with_timezone(&Utc)
+    });
 
     let secs_since_year_start = (now_utc - year_start).num_seconds().max(0);
     let utc_time: u64 = (secs_since_year_start / 2) as u64 & 0xFF_FFFF; // 24 bits
@@ -58,11 +55,7 @@ fn encode_tetra_network_time_inner(now_utc: chrono::DateTime<Utc>, tz: chrono_tz
 
     // Pack into 48-bit value (MSB first):
     //   [47..24] utc_time | [23] sign | [22..17] offset | [16..11] year | [10..0] reserved
-    let value = (utc_time << 24)
-        | (offset_sign << 23)
-        | (offset_magnitude << 17)
-        | (year_field << 11)
-        | reserved;
+    let value = (utc_time << 24) | (offset_sign << 23) | (offset_magnitude << 17) | (year_field << 11) | reserved;
 
     Some(value)
 }

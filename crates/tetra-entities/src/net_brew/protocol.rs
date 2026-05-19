@@ -41,7 +41,6 @@ pub const FRAME_TYPE_SDS_REPORT: u8 = 2;
 pub const FRAME_TYPE_DTMF_DATA: u8 = 3;
 pub const FRAME_TYPE_PACKET_DATA: u8 = 4;
 
-
 // ─── Circuit/individual call wire format ─────────────────────────
 const CIRCULAR_NUMBER_LEN: usize = 32;
 /// Total wire size of BrewCircularCall payload: source(4)+dest(4)+number(32)+11 single-byte fields
@@ -90,7 +89,7 @@ pub struct BrewGroupTransmission {
 pub struct BrewCircularCall {
     pub source: u32,
     pub destination: u32,
-    pub number: String,  // ASCII, up to 32 bytes, NUL-padded
+    pub number: String, // ASCII, up to 32 bytes, NUL-padded
     pub priority: u8,
     pub service: u8,
     pub mode: u8,
@@ -110,7 +109,6 @@ pub struct BrewCircularGrant {
     pub grant: u8,
     pub permission: u8,
 }
-
 
 /// Call control (0xf1)
 #[derive(Debug, Clone)]
@@ -268,7 +266,6 @@ fn parse_subscriber(msg_type: u8, data: &[u8]) -> Result<BrewMessage, BrewParseE
         groups,
     }))
 }
-
 
 fn parse_fixed_ascii(bytes: &[u8]) -> String {
     let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());

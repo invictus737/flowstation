@@ -175,6 +175,7 @@ impl CcBsSubentity {
                 source_issi: requesting_party.ssi,
                 dest_gssi: dest_addr.ssi,
                 ts,
+                uplink_expected: true,
             }),
         });
 
@@ -188,6 +189,7 @@ impl CcBsSubentity {
                     source_issi: requesting_party.ssi,
                     dest_gssi: dest_addr.ssi,
                     ts,
+                    uplink_expected: true,
                 }),
             });
         }
@@ -253,6 +255,7 @@ impl CcBsSubentity {
                     source_issi: requester.ssi,
                     dest_gssi: dest_addr.ssi,
                     ts,
+                    uplink_expected: true,
                 }),
             });
 
@@ -266,6 +269,7 @@ impl CcBsSubentity {
                         source_issi: requester.ssi,
                         dest_gssi: dest_addr.ssi,
                         ts,
+                        uplink_expected: true,
                     }),
                 });
             }
@@ -348,6 +352,7 @@ impl CcBsSubentity {
                 source_issi,
                 dest_gssi,
                 ts,
+                uplink_expected: false,
             }),
         });
 

@@ -691,7 +691,7 @@ impl CcBsSubentity {
             call_id
         );
 
-        Self::signal_umac_circuit_open(queue, &circuit, None, CircuitDlMediaSource::LocalLoopback);
+        Self::signal_umac_circuit_open(queue, &circuit, None, CircuitDlMediaSource::SwMI);
 
         tracing::debug!(
             "CMCE: sending D-SETUP for NEW call call_id={} gssi={} (network-initiated)",

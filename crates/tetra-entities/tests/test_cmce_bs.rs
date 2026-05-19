@@ -4,9 +4,12 @@ use tetra_config::bluestation::StackMode;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, TxState, debug};
 use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
+use tetra_pdus::cmce::enums::transmission_grant::TransmissionGrant;
 use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation;
+use tetra_pdus::cmce::pdus::d_setup::DSetup;
 use tetra_pdus::cmce::pdus::u_facility::UFacility;
 use tetra_pdus::cmce::pdus::u_setup::USetup;
+use tetra_pdus::cmce::pdus::u_tx_ceased::UTxCeased;
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
 use tetra_saps::control::enums::circuit_mode_type::CircuitModeType;
 use tetra_saps::control::enums::communication_type::CommunicationType;
@@ -121,6 +124,52 @@ fn count_d_setups(msgs: &[SapMsg]) -> usize {
                     if prim.chan_alloc.as_ref().is_some_and(|ca| ca.usage.is_some()))
         })
         .count()
+}
+
+fn parsed_d_setups(msgs: &[SapMsg]) -> Vec<DSetup> {
+    msgs.iter()
+        .filter_map(|msg| {
+            if msg.dest != TetraEntity::Mle {
+                return None;
+            }
+            let SapMsgInner::LcmcMleUnitdataReq(prim) = &msg.msg else {
+                return None;
+            };
+            if !prim.chan_alloc.as_ref().is_some_and(|ca| ca.usage.is_some()) {
+                return None;
+            }
+            let mut sdu = BitBuffer::from_bitstr(&prim.sdu.to_bitstr());
+            DSetup::from_bitbuf(&mut sdu).ok()
+        })
+        .collect()
+}
+
+fn build_u_tx_ceased_msg(calling_issi: u32, call_id: u16) -> SapMsg {
+    let mut sdu = BitBuffer::new_autoexpand(24);
+    UTxCeased {
+        call_identifier: call_id,
+        facility: None,
+        dm_ms_address: None,
+        proprietary: None,
+    }
+    .to_bitbuf(&mut sdu)
+    .expect("Failed to serialize UTxCeased");
+    sdu.seek(0);
+
+    SapMsg {
+        sap: Sap::LcmcSap,
+        src: TetraEntity::Mle,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::LcmcMleUnitdataInd(LcmcMleUnitdataInd {
+            sdu,
+            handle: 1,
+            endpoint_id: 1,
+            link_id: 1,
+            received_tetra_address: TetraAddress::new(calling_issi, SsiType::Issi),
+            chan_change_resp_req: false,
+            chan_change_handle: None,
+        }),
+    }
 }
 
 #[test]
@@ -239,5 +288,55 @@ fn test_dsetup_late_entry_throttle() {
         new_reporters.len(),
         unthrottled_count,
         "Each re-sent D-SETUP should carry a fresh tx_reporter"
+    );
+}
+
+#[test]
+fn test_hangtime_late_entry_dsetup_does_not_advertise_not_granted() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew],
+    );
+
+    register_subscriber(&mut test, TEST_ISSI, TEST_GSSI);
+    test.submit_message(build_u_setup_msg(TEST_ISSI, TEST_GSSI));
+    test.run_stack(Some(4));
+
+    let mut initial_msgs = test.dump_sinks();
+    for reporter in extract_d_setup_reporters(&mut initial_msgs) {
+        reporter.mark_transmitted();
+    }
+    let call_id = parsed_d_setups(&initial_msgs)
+        .first()
+        .map(|setup| setup.call_identifier)
+        .expect("expected initial D-SETUP");
+
+    test.submit_message(build_u_tx_ceased_msg(TEST_ISSI, call_id));
+    test.run_stack(Some(8));
+    let mut hangtime_msgs = test.dump_sinks();
+    for reporter in extract_d_setup_reporters(&mut hangtime_msgs) {
+        reporter.mark_transmitted();
+    }
+
+    test.run_stack(Some(400));
+    let late_entry_setups: Vec<_> = parsed_d_setups(&test.dump_sinks())
+        .into_iter()
+        .filter(|setup| setup.call_identifier == call_id)
+        .collect();
+
+    assert!(!late_entry_setups.is_empty(), "expected late-entry D-SETUP during hangtime");
+    assert!(
+        late_entry_setups
+            .iter()
+            .all(|setup| setup.transmission_grant == TransmissionGrant::GrantedToOtherUser),
+        "hangtime late-entry D-SETUP must keep radios in listener/request-capable state"
+    );
+    assert!(
+        late_entry_setups.iter().all(|setup| !setup.transmission_request_permission),
+        "hangtime late-entry D-SETUP must allow transmission requests"
     );
 }

@@ -22,7 +22,11 @@ const DELAY_FRAMES: usize = 10;
 
 impl EchoSession {
     pub fn new(ts: u8, call_id: u16) -> Self {
-        Self { ts, call_id, buffer: VecDeque::with_capacity(DELAY_FRAMES + 4) }
+        Self {
+            ts,
+            call_id,
+            buffer: VecDeque::with_capacity(DELAY_FRAMES + 4),
+        }
     }
 
     /// Feed an UL ACELP frame. Returns a DL frame to play back (if ready).
@@ -39,7 +43,7 @@ impl EchoSession {
     pub fn make_dl_msg(ts: u8, data: Vec<u8>) -> SapMsg {
         SapMsg {
             sap: Sap::TmdSap,
-            src: TetraEntity::Brew,   // UMAC listens for Brew→Umac on TmdSap
+            src: TetraEntity::Brew, // UMAC listens for Brew→Umac on TmdSap
             dest: TetraEntity::Umac,
             msg: SapMsgInner::TmdCircuitDataReq(TmdCircuitDataReq { ts, data }),
         }

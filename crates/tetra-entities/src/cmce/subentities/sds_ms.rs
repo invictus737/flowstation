@@ -17,7 +17,8 @@ impl SdsMsSubentity {
         tracing::trace!("rx_sds_data");
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
         let _pdu = match DSdsData::from_bitbuf(&mut prim.sdu) {
             Ok(pdu) => {
@@ -40,7 +41,8 @@ impl SdsMsSubentity {
         tracing::trace!("route_rf_deliver");
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
         let Some(bits) = prim.sdu.peek_bits(5) else {
             tracing::warn!("insufficient bits: {}", prim.sdu.dump_bin());
@@ -61,7 +63,8 @@ impl SdsMsSubentity {
                 unimplemented_log!("rx_prim not implemented for SDS DStatus PDU");
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }

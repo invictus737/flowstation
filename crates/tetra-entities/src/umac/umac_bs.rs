@@ -22,7 +22,7 @@ use tetra_pdus::umac::pdus::mac_sync::MacSync;
 use tetra_pdus::umac::pdus::mac_sysinfo::MacSysinfo;
 use tetra_pdus::umac::pdus::mac_u_blck::MacUBlck;
 use tetra_pdus::umac::pdus::mac_u_signal::MacUSignal;
-use tetra_saps::control::call_control::{CallControl, Circuit};
+use tetra_saps::control::call_control::{CallControl, Circuit, CircuitDlMediaSource};
 use tetra_saps::lcmc::enums::alloc_type::ChanAllocType;
 use tetra_saps::lcmc::enums::ul_dl_assignment::UlDlAssignment;
 use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
@@ -1296,9 +1296,12 @@ impl UmacBs {
             // DL voice from Brew/upper layer → schedule for DL transmission
             SapMsgInner::TmdCircuitDataReq(prim) => {
                 let ts = prim.ts;
-                // Refresh UL inactivity timer when DL voice is being fed (network call scenario).
-                // This prevents false timeout when Brew is the speaker and no UL radio is transmitting.
-                if (1..=4).contains(&ts) && self.channel_scheduler.circuit_is_active(Direction::Ul, ts) {
+                // Only local RF speakers should drive UL inactivity. Brew/SwMI
+                // downlink frames may be jittery and must not expire the call.
+                if (1..=4).contains(&ts)
+                    && self.channel_scheduler.circuit_is_active(Direction::Ul, ts)
+                    && self.channel_scheduler.ul_circuit_dl_media_source(ts) != CircuitDlMediaSource::SwMI
+                {
                     self.last_ul_voice[ts as usize - 1] = Some(self.dltime);
                 }
                 if self.channel_scheduler.circuit_is_active(Direction::Dl, ts) {
@@ -1558,6 +1561,10 @@ impl UmacBs {
                 continue;
             }
 
+            if self.channel_scheduler.ul_circuit_dl_media_source(ts) == CircuitDlMediaSource::SwMI {
+                continue;
+            }
+
             // Check if we've exceeded the inactivity threshold
             let timed_out = match self.last_ul_voice[idx] {
                 Some(t) => t.age(self.dltime) > ul_inactivity_timeslots,
@@ -1607,11 +1614,19 @@ impl UmacBs {
                     self.last_ul_voice[ts as usize - 1] = None;
                 }
             }
-            CallControl::FloorGranted { ts, .. } => {
+            CallControl::FloorGranted { ts, uplink_expected, .. } => {
                 self.channel_scheduler.set_hangtime(ts, false);
+                self.channel_scheduler.set_circuit_dl_media_source(
+                    ts,
+                    if uplink_expected {
+                        CircuitDlMediaSource::LocalLoopback
+                    } else {
+                        CircuitDlMediaSource::SwMI
+                    },
+                );
                 // Restart UL inactivity timer when new speaker gets floor
                 if (1..=4).contains(&ts) {
-                    self.last_ul_voice[ts as usize - 1] = Some(self.dltime);
+                    self.last_ul_voice[ts as usize - 1] = uplink_expected.then_some(self.dltime);
                 }
             }
             CallControl::CallEnded { ts, .. } => {
