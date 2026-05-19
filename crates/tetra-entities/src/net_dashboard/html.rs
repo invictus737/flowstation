@@ -1291,6 +1291,10 @@ function showPage(name,el){
 // ── State + WS ────────────────────────────────────────────────────────────
 let ws=null,state={ms:{},calls:{},lastHeard:[],brewOnline:false,brewVer:0},sdsDest=0;
 const logFilter=()=>document.getElementById('log-filter').value;
+function ensureMs(issi){
+  if(!state.ms[issi])state.ms[issi]={issi,groups:[],rssi_dbfs:null,energy_saving_mode:0,_last_seen_ts:Date.now()};
+  return state.ms[issi];
+}
 
 function setBrewStatus(online,version){
   state.brewOnline=online;state.brewVer=version||0;
@@ -1364,16 +1368,16 @@ function handleMsg(msg){
     case 'ms_deregistered':
       delete state.ms[msg.issi];renderStations();break;
     case 'ms_rssi':
-      if(state.ms[msg.issi]){state.ms[msg.issi].rssi_dbfs=msg.rssi_dbfs;state.ms[msg.issi]._last_seen_ts=Date.now();}
+      {const m=ensureMs(msg.issi);m.rssi_dbfs=msg.rssi_dbfs;m._last_seen_ts=Date.now();}
       renderStations();break;
     case 'ms_groups':
-      if(state.ms[msg.issi]){const cur=new Set(state.ms[msg.issi].groups||[]);(msg.groups||[]).forEach(g=>cur.add(g));state.ms[msg.issi].groups=[...cur];}
+      {const m=ensureMs(msg.issi),cur=new Set(m.groups||[]);(msg.groups||[]).forEach(g=>cur.add(g));m.groups=[...cur];m._last_seen_ts=Date.now();}
       renderStations();break;
     case 'ms_groups_detach':
-      if(state.ms[msg.issi]){const rem=new Set(msg.groups||[]);state.ms[msg.issi].groups=(state.ms[msg.issi].groups||[]).filter(g=>!rem.has(g));}
+      {const m=ensureMs(msg.issi),rem=new Set(msg.groups||[]);m.groups=(m.groups||[]).filter(g=>!rem.has(g));m._last_seen_ts=Date.now();}
       renderStations();break;
     case 'ms_groups_all':
-      if(state.ms[msg.issi])state.ms[msg.issi].groups=msg.groups||[];
+      {const m=ensureMs(msg.issi);m.groups=msg.groups||[];m._last_seen_ts=Date.now();}
       renderStations();break;
     case 'call_started':
       state.calls[msg.call_id]={...msg,started_at:Date.now()};

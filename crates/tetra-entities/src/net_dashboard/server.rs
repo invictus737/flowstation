@@ -289,34 +289,33 @@ impl DashboardServer {
                     s.push_log("INFO", format!("MS {} deregistered", issi));
                 }
                 TelemetryEvent::MsGroupAttach { issi, gssis } => {
-                    if let Some(e) = s.ms_map.get_mut(issi) {
-                        for g in gssis {
-                            if !e.groups.contains(g) {
-                                e.groups.push(*g);
-                            }
+                    let e = s.ensure_ms_entry(*issi);
+                    e.last_seen = Instant::now();
+                    for g in gssis {
+                        if !e.groups.contains(g) {
+                            e.groups.push(*g);
                         }
                     }
                 }
                 TelemetryEvent::MsGroupsSnapshot { issi, gssis } => {
-                    if let Some(e) = s.ms_map.get_mut(issi) {
-                        e.groups = gssis.clone();
-                    }
+                    let e = s.ensure_ms_entry(*issi);
+                    e.groups = gssis.clone();
+                    e.last_seen = Instant::now();
                 }
                 TelemetryEvent::MsGroupDetach { issi, gssis } => {
-                    if let Some(e) = s.ms_map.get_mut(issi) {
-                        e.groups.retain(|g| !gssis.contains(g));
-                    }
+                    let e = s.ensure_ms_entry(*issi);
+                    e.groups.retain(|g| !gssis.contains(g));
+                    e.last_seen = Instant::now();
                 }
                 TelemetryEvent::MsRssi { issi, rssi_dbfs } => {
-                    if let Some(e) = s.ms_map.get_mut(issi) {
-                        e.rssi_dbfs = Some(*rssi_dbfs);
-                        e.last_seen = Instant::now();
-                    }
+                    let e = s.ensure_ms_entry(*issi);
+                    e.rssi_dbfs = Some(*rssi_dbfs);
+                    e.last_seen = Instant::now();
                 }
                 TelemetryEvent::MsEnergySaving { issi, mode } => {
-                    if let Some(e) = s.ms_map.get_mut(issi) {
-                        e.energy_saving_mode = *mode;
-                    }
+                    let e = s.ensure_ms_entry(*issi);
+                    e.energy_saving_mode = *mode;
+                    e.last_seen = Instant::now();
                 }
                 TelemetryEvent::GroupCallStarted {
                     call_id,

@@ -135,6 +135,17 @@ impl DashboardStateInner {
         self.log_ring.push_back(entry);
     }
 
+    pub fn ensure_ms_entry(&mut self, issi: u32) -> &mut MsEntry {
+        self.ms_map.entry(issi).or_insert_with(|| MsEntry {
+            issi,
+            groups: Vec::new(),
+            rssi_dbfs: None,
+            registered_at: Instant::now(),
+            last_seen: Instant::now(),
+            energy_saving_mode: 0,
+        })
+    }
+
     pub fn snapshot_ms(&self) -> Vec<MsState> {
         self.ms_map
             .values()

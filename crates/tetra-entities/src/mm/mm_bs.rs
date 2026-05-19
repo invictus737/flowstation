@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use crate::net_control::ControlEndpoint;
 use crate::net_telemetry::channel::TelemetrySink;
@@ -36,6 +37,9 @@ use tetra_pdus::mm::pdus::u_tei_provide::UTeiProvide;
 
 const PERIODIC_REGISTRATION_REFRESH_GRACE_SECS: u32 = 60;
 const MAX_PERIODIC_REGISTRATION_REFRESH_ATTEMPTS: u8 = 3;
+const STARTUP_LOCATION_REFRESH_DELAY_SLOTS: u32 = 4 * 18 * 3;
+const MS_CACHE_ENV: &str = "FLOWSTATION_MS_CACHE";
+const DEFAULT_MS_CACHE_FILE: &str = ".flowstation-ms-cache";
 
 pub struct MmBs {
     config: SharedConfig,
@@ -44,11 +48,14 @@ pub struct MmBs {
     client_mgr: MmClientMgr,
     current_dl_time: TdmaTime,
     forced_location_updates: HashSet<u32>,
+    cached_issis: HashSet<u32>,
+    startup_location_refresh_slots_left: u32,
 }
 
 impl MmBs {
     pub fn new(config: SharedConfig, telemetry: Option<TelemetrySink>, control: Option<ControlEndpoint>) -> Self {
         let client_mgr = MmClientMgr::new(telemetry.clone());
+        let cached_issis = Self::load_cached_issis();
         Self {
             config,
             telemetry,
@@ -56,6 +63,81 @@ impl MmBs {
             client_mgr,
             current_dl_time: TdmaTime::default(),
             forced_location_updates: HashSet::new(),
+            cached_issis,
+            startup_location_refresh_slots_left: STARTUP_LOCATION_REFRESH_DELAY_SLOTS,
+        }
+    }
+
+    fn ms_cache_path() -> PathBuf {
+        std::env::var_os(MS_CACHE_ENV).map(PathBuf::from).unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join(DEFAULT_MS_CACHE_FILE)
+        })
+    }
+
+    fn load_cached_issis() -> HashSet<u32> {
+        let path = Self::ms_cache_path();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return HashSet::new();
+        };
+        let issis = text
+            .lines()
+            .filter_map(|line| line.trim().parse::<u32>().ok())
+            .filter(|issi| *issi > 0)
+            .collect::<HashSet<_>>();
+        if !issis.is_empty() {
+            tracing::info!("MM: loaded {} cached ISSI(s) from {}", issis.len(), path.display());
+        }
+        issis
+    }
+
+    fn persist_cached_issis(&self) {
+        let path = Self::ms_cache_path();
+        let mut issis: Vec<u32> = self.cached_issis.iter().copied().collect();
+        issis.sort_unstable();
+        let body = issis.into_iter().map(|issi| format!("{}\n", issi)).collect::<String>();
+        if let Err(e) = std::fs::write(&path, body) {
+            tracing::warn!("MM: failed writing MS cache {}: {}", path.display(), e);
+        }
+    }
+
+    fn remember_registered_issi(&mut self, issi: u32) {
+        if self.cached_issis.insert(issi) {
+            self.persist_cached_issis();
+        }
+    }
+
+    fn forget_registered_issi(&mut self, issi: u32) {
+        if self.cached_issis.remove(&issi) {
+            self.persist_cached_issis();
+        }
+    }
+
+    fn run_startup_location_refresh(&mut self, queue: &mut MessageQueue) {
+        if self.startup_location_refresh_slots_left > 0 {
+            self.startup_location_refresh_slots_left -= 1;
+            return;
+        }
+
+        let cached: Vec<u32> = self.cached_issis.iter().copied().collect();
+        if cached.is_empty() {
+            return;
+        }
+
+        self.startup_location_refresh_slots_left = u32::MAX;
+        let mut queued = 0usize;
+        for issi in cached {
+            if self.client_mgr.client_is_known(issi) {
+                continue;
+            }
+            tracing::info!("MM: startup refresh — probing cached ISSI {} with D-LOCATION-UPDATE-COMMAND", issi);
+            self.forced_location_updates.insert(issi);
+            Self::send_d_location_update_command(queue, issi, 0, true);
+            queued += 1;
+        }
+        if queued > 0 {
+            tracing::info!("MM: startup refresh queued D-LOCATION-UPDATE-COMMAND for {} cached ISSI(s)", queued);
         }
     }
 
@@ -194,6 +276,7 @@ impl MmBs {
         let detached_client = self.client_mgr.remove_client(ssi);
         if let Some(client) = detached_client {
             self.config.state_write().subscribers.deregister(ssi);
+            self.forget_registered_issi(ssi);
             if !client.groups.is_empty() {
                 let groups: Vec<u32> = client.groups.iter().copied().collect();
                 self.emit_subscriber_update(queue, ssi, groups, BrewSubscriberAction::Deaffiliate);
@@ -371,6 +454,7 @@ impl MmBs {
             match self.client_mgr.try_register_client(issi, true) {
                 Ok(_) => {
                     self.config.state_write().subscribers.register(issi);
+                    self.remember_registered_issi(issi);
                 }
                 Err(e) => {
                     tracing::warn!("Failed registering roaming MS {}: {:?}", issi, e);
@@ -390,6 +474,7 @@ impl MmBs {
                     );
                 }
                 self.config.state_write().subscribers.register(issi);
+                self.remember_registered_issi(issi);
             }
             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
         } else if was_pending {
@@ -685,6 +770,7 @@ impl MmBs {
                 match self.client_mgr.try_register_client(issi, true) {
                     Ok(_) => {
                         self.config.state_write().subscribers.register(issi);
+                        self.remember_registered_issi(issi);
                         self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
                     }
                     Err(e) => {
@@ -1210,6 +1296,7 @@ impl TetraEntityTrait for MmBs {
 
     fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
         self.current_dl_time = ts;
+        self.run_startup_location_refresh(queue);
 
         if let Some(cep) = &self.control {
             while let Some(cmd) = cep.try_recv() {
@@ -1347,6 +1434,7 @@ impl TetraEntityTrait for MmBs {
                             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
                             self.client_mgr.remove_client(issi);
                             self.config.state_write().subscribers.deregister(issi);
+                            self.forget_registered_issi(issi);
                             self.store_and_emit_energy_saving(queue, issi, None, None);
                         }
                     }
