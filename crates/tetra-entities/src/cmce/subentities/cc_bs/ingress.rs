@@ -47,8 +47,9 @@ impl CcBsSubentity {
                 source_issi,
                 dest_gssi,
                 priority,
+                source_mnemonic,
             } => {
-                self.rx_network_call_start(queue, brew_uuid, source_issi, dest_gssi, priority);
+                self.rx_network_call_start(queue, brew_uuid, source_issi, dest_gssi, priority, source_mnemonic);
             }
             CallControl::NetworkCallEnd { brew_uuid } => {
                 self.rx_network_call_end(queue, brew_uuid);

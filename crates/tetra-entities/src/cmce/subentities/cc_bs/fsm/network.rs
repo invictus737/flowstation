@@ -555,6 +555,7 @@ impl CcBsSubentity {
         source_issi: u32,
         dest_gssi: u32,
         priority: u8,
+        source_mnemonic: Option<String>,
     ) {
         if !net_brew::is_brew_gssi_routable(&self.config, dest_gssi) {
             tracing::warn!(
@@ -587,6 +588,8 @@ impl CcBsSubentity {
             });
             return;
         }
+
+        self.tpi_note_network_mnemonic(source_issi, source_mnemonic.as_deref());
 
         // Speaker change for an existing GSSI call
         if let Some((call_id, old_speaker)) = self

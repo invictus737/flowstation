@@ -11,6 +11,7 @@ use tetra_config::bluestation::{CfgIdentity, CfgManualIdentity, CfgRadioId};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentitySource {
     Manual,
+    Brew,
     RadioId,
 }
 
@@ -108,6 +109,23 @@ impl IdentityResolver {
         for ssi in ssis {
             let _ = self.lookup(ssi);
         }
+    }
+
+    pub fn observe_brew_mnemonic(&self, ssi: u32, mnemonic: &str) -> Option<IdentityRecord> {
+        if !self.enabled {
+            return None;
+        }
+
+        let mnemonic = normalize_mnemonic(mnemonic)?;
+        let record = IdentityRecord {
+            ssi,
+            mnemonic: Some(mnemonic),
+            label: None,
+            source: IdentitySource::Brew,
+        };
+        let mut inner = self.inner.lock().expect("IdentityResolver mutex poisoned");
+        cache_insert_locked(&mut inner, self.cache_max_entries, self.cache_ttl, ssi, Some(record.clone()), Instant::now());
+        Some(record)
     }
 
     fn cached_lookup(&self, ssi: u32, now: Instant) -> Option<Option<IdentityRecord>> {

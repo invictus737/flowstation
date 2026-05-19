@@ -88,6 +88,27 @@ pub struct BrewGroupTransmission {
     pub mnemonic: Option<[u8; 34]>,
 }
 
+pub fn decode_mnemonic_name(raw: &[u8; 34]) -> Option<String> {
+    let len_bits = raw[1] as usize;
+    if len_bits == 0 || len_bits % 8 != 0 {
+        return None;
+    }
+
+    let len = (len_bits / 8).min(32);
+    let bytes = &raw[2..2 + len];
+    let name = bytes
+        .iter()
+        .copied()
+        .take_while(|byte| *byte != 0)
+        .map(char::from)
+        .collect::<String>();
+    if name.trim().is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 /// Circuit/PBX/phone call data, part of SETUP_REQUEST / CONNECT_REQUEST
 /// (ETSI EN 300 392-2 §14 individual call fields mapped to Brew wire format)
 #[derive(Debug, Clone)]

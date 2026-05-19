@@ -131,6 +131,15 @@ fn count_d_setups(msgs: &[SapMsg]) -> usize {
 }
 
 fn build_network_call_start_msg(brew_uuid: Uuid, source_issi: u32, dest_gssi: u32) -> SapMsg {
+    build_network_call_start_msg_with_mnemonic(brew_uuid, source_issi, dest_gssi, None)
+}
+
+fn build_network_call_start_msg_with_mnemonic(
+    brew_uuid: Uuid,
+    source_issi: u32,
+    dest_gssi: u32,
+    source_mnemonic: Option<&str>,
+) -> SapMsg {
     SapMsg {
         sap: Sap::Control,
         src: TetraEntity::Brew,
@@ -140,6 +149,7 @@ fn build_network_call_start_msg(brew_uuid: Uuid, source_issi: u32, dest_gssi: u3
             source_issi,
             dest_gssi,
             priority: 0,
+            source_mnemonic: source_mnemonic.map(str::to_string),
         }),
     }
 }
@@ -250,6 +260,57 @@ fn test_network_hangtime_reuse_refreshes_group_dsetup_with_tpi_mnemonic() {
         granted.facility.is_none(),
         "D-TX GRANTED is sent over FACCH/STCH and must remain facility-free to stay within signalling capacity"
     );
+}
+
+#[test]
+fn test_network_group_setup_uses_brew_v1_mnemonic_without_manual_identity() {
+    debug::setup_logging_verbose();
+
+    const BREW_SPEAKER: u32 = 4_041_258;
+
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut config = ComponentTest::get_default_test_config(StackMode::Bs);
+    config.brew = Some(CfgBrew {
+        host: "test.invalid".to_string(),
+        port: 443,
+        tls: true,
+        username: None,
+        password: None,
+        reconnect_delay: Duration::from_secs(1),
+        jitter_initial_latency_frames: 0,
+        feature_sds_enabled: true,
+        feature_rssi_export: false,
+        whitelisted_ssis: None,
+    });
+    config.identity.enabled = true;
+    config.identity.emit_mnemonic_name = true;
+    config.identity.subscription_allows_mnemonic = true;
+
+    let mut test = ComponentTest::from_config(config, Some(dltime));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew],
+    );
+    register_subscriber(&mut test, TEST_ISSI, TEST_GSSI);
+
+    test.submit_message(build_network_call_start_msg_with_mnemonic(
+        Uuid::new_v4(),
+        BREW_SPEAKER,
+        TEST_GSSI,
+        Some("VU3JRZ"),
+    ));
+    test.run_stack(Some(2));
+    let msgs = test.dump_sinks();
+
+    let setup = decode_d_setups(&msgs)
+        .into_iter()
+        .find(|setup| setup.calling_party_address_ssi == Some(BREW_SPEAKER))
+        .expect("Brew-started group call should emit D-SETUP");
+    let facility = setup
+        .facility
+        .expect("Brew v1 mnemonic should feed SS-TPI immediately, before RadioID cache resolves");
+    assert_eq!(facility.mnemonic_name.as_deref(), Some("VU3JRZ"));
+    assert_eq!(facility.talking_sending_party_ssi, None);
 }
 
 #[test]

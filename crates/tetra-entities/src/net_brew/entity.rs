@@ -129,6 +129,8 @@ pub struct BrewEntity {
 
     /// Whether the worker is connected
     connected: bool,
+    /// Brew protocol version detected for the current connection (0 = unknown/v0).
+    brew_server_version: u8,
     /// Optional telemetry sink for emitting brew status events
     telemetry_sink: Option<TelemetrySink>,
 
@@ -179,6 +181,7 @@ impl BrewEntity {
             ul_forwarded: HashMap::new(),
             subscriber_groups: HashMap::new(),
             connected: false,
+            brew_server_version: 0,
             telemetry_sink: None,
             rssi_last_sent: HashMap::new(),
             worker_handle: Some(handle),
@@ -202,17 +205,17 @@ impl BrewEntity {
                 }
                 BrewEvent::VersionDetected { version } => {
                     tracing::info!("BrewEntity: server Brew version detected from message length: v{}", version);
-                    self.emit_brew_version(version);
-                    // Notify MM that Brew reconnected so it can send D-LOCATION-UPDATE-COMMAND
-                    // to all locally registered MS. Without this, MS units that were registered
-                    // before the disconnect believe they are still affiliated and do not
-                    // re-register — PTT calls are denied until the radio is power-cycled.
-                    queue.push_back(SapMsg {
-                        sap: tetra_core::Sap::Control,
-                        src: TetraEntity::Brew,
-                        dest: TetraEntity::Mm,
-                        msg: SapMsgInner::BrewReconnected,
-                    });
+                    let changed = self.set_network_connected(true, version);
+                    if changed {
+                        // Notify MM once when the effective Brew connection/version changes so it
+                        // can refresh locally registered MS state.
+                        queue.push_back(SapMsg {
+                            sap: tetra_core::Sap::Control,
+                            src: TetraEntity::Brew,
+                            dest: TetraEntity::Mm,
+                            msg: SapMsgInner::BrewReconnected,
+                        });
+                    }
                 }
                 BrewEvent::Disconnected(reason) => {
                     tracing::warn!("BrewEntity: Brew backhaul disconnected: {} — releasing all active calls", reason);
@@ -227,9 +230,10 @@ impl BrewEntity {
                     dest_gssi,
                     priority,
                     service,
+                    mnemonic,
                 } => {
                     tracing::info!("BrewEntity: GROUP_TX service={} (0=TETRA ACELP, expect 0)", service);
-                    self.handle_group_call_start(queue, uuid, source_issi, dest_gssi, priority);
+                    self.handle_group_call_start(queue, uuid, source_issi, dest_gssi, priority, mnemonic);
                 }
                 BrewEvent::GroupCallEnd { uuid, cause } => {
                     self.handle_group_call_end(queue, uuid, cause);
@@ -541,21 +545,27 @@ impl BrewEntity {
         }
     }
 
-    fn set_network_connected(&mut self, connected: bool, server_version: u8) {
+    fn set_network_connected(&mut self, connected: bool, server_version: u8) -> bool {
         self.connected = connected;
+        let version_changed = self.brew_server_version != server_version;
+        self.brew_server_version = server_version;
         let changed = {
             let mut state = self.config.state_write();
             if state.network_connected != connected {
                 state.network_connected = connected;
                 tracing::info!("BrewEntity: backhaul {}", if connected { "CONNECTED" } else { "DISCONNECTED" });
                 true
-            } else { false }
+            } else {
+                false
+            }
         };
+        let changed = changed || version_changed;
         if changed {
             if let Some(ref sink) = self.telemetry_sink {
                 let _ = sink.send(TelemetryEvent::BrewConnected { connected, server_version });
             }
         }
+        changed
     }
 
     /// Emit a brew version upgrade event directly without changing connection state.
@@ -566,7 +576,15 @@ impl BrewEntity {
     }
 
     /// Handle new group call from Brew, reusing hanging call circuits if available.
-    fn handle_group_call_start(&mut self, queue: &mut MessageQueue, uuid: Uuid, source_issi: u32, dest_gssi: u32, priority: u8) {
+    fn handle_group_call_start(
+        &mut self,
+        queue: &mut MessageQueue,
+        uuid: Uuid,
+        source_issi: u32,
+        dest_gssi: u32,
+        priority: u8,
+        mnemonic: Option<String>,
+    ) {
         // Check if this call is already active (speaker change or repeated GROUP_TX)
         if let Some(call) = self.active_calls.get_mut(&uuid) {
             // Only notify CMCE if the speaker actually changed
@@ -599,6 +617,7 @@ impl BrewEntity {
                         source_issi,
                         dest_gssi,
                         priority,
+                        source_mnemonic: mnemonic,
                     }),
                 });
             } else {
@@ -642,6 +661,7 @@ impl BrewEntity {
                     source_issi,
                     dest_gssi,
                     priority,
+                    source_mnemonic: mnemonic,
                 }),
             });
             return;
@@ -679,6 +699,7 @@ impl BrewEntity {
                 source_issi,
                 dest_gssi,
                 priority,
+                source_mnemonic: mnemonic,
             }),
         });
     }
