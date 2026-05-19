@@ -1,3 +1,4 @@
+use crate::net_telemetry::TelemetrySink;
 use soapysdr;
 use tetra_config::bluestation::{SharedConfig, StackMode, sec_phy_soapy::CfgSoapySdr};
 
@@ -7,6 +8,7 @@ use super::dsp_types::*;
 use super::soapy_settings;
 use super::soapy_settings::{SdrSettings, SupportedDevice};
 use super::soapy_time::{ticks_to_time_ns, time_ns_to_ticks};
+use super::sx1255_autocal::{AutocalFrequencies, Sx1255Autocal};
 
 type StreamType = ComplexSample;
 const SOAPY_FREQ_OFFSET: f64 = 20000.0;
@@ -40,6 +42,7 @@ pub struct SoapyIo {
     rx: Option<soapysdr::RxStream<StreamType>>,
     /// Transmit stream. None if transmitting is disabled.
     tx: Option<soapysdr::TxStream<StreamType>>,
+    sx1255_autocal: Sx1255Autocal,
 }
 
 /// Soapy/Lime timestamps can occasionally jitter by a single sample.
@@ -61,7 +64,7 @@ macro_rules! soapycheck {
 }
 
 impl SoapyIo {
-    pub fn new(cfg: &SharedConfig) -> Result<Self, soapysdr::Error> {
+    pub fn new(cfg: &SharedConfig, telemetry: Option<TelemetrySink>) -> Result<Self, soapysdr::Error> {
         let binding = cfg.config();
         let soapy_cfg = binding
             .phy_io
@@ -71,7 +74,7 @@ impl SoapyIo {
 
         let mode = cfg.config().stack_mode;
 
-        let (dev, sdr_settings) = open_device(&soapy_cfg, mode)?;
+        let (dev, sdr_settings, detected_device) = open_device(&soapy_cfg, mode)?;
 
         let rx_ch = sdr_settings.rx_ch;
         let tx_ch = sdr_settings.tx_ch;
@@ -96,6 +99,14 @@ impl SoapyIo {
 
         let rx_enabled = rx_freq.is_some();
         let tx_enabled = tx_freq.is_some();
+        let mut sx1255_autocal = Sx1255Autocal::new(
+            soapy_cfg.sx1255_autocal.clone(),
+            detected_device == SupportedDevice::SXceiver,
+            AutocalFrequencies {
+                rx_hz: rx_freq,
+                tx_hz: tx_freq,
+            },
+        );
 
         let mut rx_fs: f64 = 0.0;
         if rx_enabled {
@@ -154,6 +165,9 @@ impl SoapyIo {
             }
         }
 
+        sx1255_autocal.startup(&dev, rx_ch, tx_ch);
+        sx1255_autocal.startup_loopback_calibration(&dev, rx_ch, tx_ch, rx_fs, &sdr_settings.rx_args, &sdr_settings.tx_args, telemetry.as_ref());
+
         let mut rx_args = soapysdr::Args::new();
         for (key, value) in sdr_settings.rx_args {
             rx_args.set(key, value);
@@ -192,14 +206,18 @@ impl SoapyIo {
             dev,
             rx,
             tx,
+            sx1255_autocal,
         })
     }
 
     pub fn receive(&mut self, buffer: &mut [StreamType]) -> Result<RxResult, RxTxDevError> {
+        self.sx1255_autocal.periodic(&self.dev, self.rx_ch, self.tx_ch);
         if let Some(rx) = &mut self.rx {
             // RX is enabled
             match rx.read(&mut [buffer], 1000000) {
                 Ok(len) => {
+                    self.sx1255_autocal.rx_startup_compensation().apply(&mut buffer[..len]);
+
                     // Get timestamp, set initial time if not yet set
                     let time = rx.time_ns();
                     // rust-soapysdr does not let us if a timestamp was available
@@ -334,6 +352,26 @@ impl SoapyIo {
     pub fn tx_enabled(&self) -> bool {
         self.tx.is_some()
     }
+
+    pub fn set_rf_gain(&mut self, direction: soapysdr::Direction, name: &str, value: f64) -> Result<f64, String> {
+        let ch = match direction {
+            soapysdr::Direction::Rx => self.rx_ch,
+            soapysdr::Direction::Tx => self.tx_ch,
+        };
+        self.dev
+            .set_gain_element(direction, ch, name, value)
+            .map_err(|e| format!("set {} gain {}={:.2} failed: {}", rf_direction_name(direction), name, value, e))?;
+        self.dev
+            .gain_element(direction, ch, name)
+            .map_err(|e| format!("read {} gain {} failed after set: {}", rf_direction_name(direction), name, e))
+    }
+}
+
+fn rf_direction_name(direction: soapysdr::Direction) -> &'static str {
+    match direction {
+        soapysdr::Direction::Rx => "RX",
+        soapysdr::Direction::Tx => "TX",
+    }
 }
 
 // Messy logic related to opening a device follows...
@@ -411,14 +449,15 @@ fn find_supported_device(filter_args: soapysdr::Args) -> Result<OpenedDevice, so
 
 /// Open a given device if argument string is given,
 /// automatically find the first supported device if not.
-fn open_device(soapy_cfg: &CfgSoapySdr, mode: StackMode) -> Result<(soapysdr::Device, SdrSettings), soapysdr::Error> {
+fn open_device(soapy_cfg: &CfgSoapySdr, mode: StackMode) -> Result<(soapysdr::Device, SdrSettings, SupportedDevice), soapysdr::Error> {
     let mut opened_device = if let Some(arg_string) = &soapy_cfg.device {
         open_given_device(arg_string.as_str().into())
     } else {
         find_supported_device(soapysdr::Args::new())
     }?;
 
-    let mut sdr_settings = match SdrSettings::get_settings(&soapy_cfg, opened_device.detected_device, mode) {
+    let detected_device = opened_device.detected_device;
+    let mut sdr_settings = match SdrSettings::get_settings(&soapy_cfg, detected_device, mode) {
         Ok(sdr_settings) => sdr_settings,
         Err(soapy_settings::Error::InvalidConfiguration) => {
             return Err(soapysdr::Error {
@@ -472,5 +511,5 @@ fn open_device(soapy_cfg: &CfgSoapySdr, mode: StackMode) -> Result<(soapysdr::De
         }
     }
 
-    Ok((opened_device.dev, sdr_settings))
+    Ok((opened_device.dev, sdr_settings, detected_device))
 }

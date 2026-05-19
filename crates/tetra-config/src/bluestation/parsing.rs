@@ -6,8 +6,10 @@ use std::path::Path;
 use serde::Deserialize;
 use toml::Value;
 
-use crate::bluestation::{CellInfoDto, CfgControlDto, NetInfoDto, apply_control_patch, cell_dto_to_cfg, net_dto_to_cfg};
 use crate::bluestation::sec_cell::{CfgNeighborCellCa, SdsCommandControlDto};
+use crate::bluestation::{
+    CellInfoDto, CfgControlDto, CfgIdentityDto, NetInfoDto, apply_control_patch, apply_identity_patch, cell_dto_to_cfg, net_dto_to_cfg,
+};
 
 use super::config::{StackConfig, StackMode};
 use super::sec_brew::{CfgBrewDto, apply_brew_patch};
@@ -95,6 +97,15 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         if !extra_keys_filtered.is_empty() {
             return Err(format!("Unrecognized fields: phy_io.soapysdr::{:?}", extra_keys_filtered).into());
         }
+        if let Some(ref autocal) = soapy.sx1255_autocal {
+            if !autocal.extra.is_empty() {
+                return Err(format!(
+                    "Unrecognized fields: phy_io.soapysdr.sx1255_autocal::{:?}",
+                    sorted_keys(&autocal.extra)
+                )
+                .into());
+            }
+        }
     }
     if !root.net_info.extra.is_empty() {
         return Err(format!("Unrecognized fields in net_info: {:?}", sorted_keys(&root.net_info.extra)).into());
@@ -117,7 +128,24 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         }
     }
 
-    // Build cell config, then inject the separately-parsed neighbor cells and sds_command_control
+    // Optional identity section
+    if let Some(ref identity) = root.identity {
+        if !identity.extra.is_empty() {
+            return Err(format!("Unrecognized fields in identity config: {:?}", sorted_keys(&identity.extra)).into());
+        }
+        for (idx, manual) in identity.manual.iter().enumerate() {
+            if !manual.extra.is_empty() {
+                return Err(format!("Unrecognized fields in identity.manual[{}]: {:?}", idx, sorted_keys(&manual.extra)).into());
+            }
+        }
+        if let Some(ref radioid) = identity.radioid {
+            if !radioid.extra.is_empty() {
+                return Err(format!("Unrecognized fields in identity.radioid: {:?}", sorted_keys(&radioid.extra)).into());
+            }
+        }
+    }
+
+    // Build cell config, then inject separately-parsed nested sections.
     let mut cell_cfg = cell_dto_to_cfg(root.cell_info);
     cell_cfg.neighbor_cells_ca = neighbor_cells_ca;
     if let Some(v) = sds_command_control_raw {
@@ -149,6 +177,7 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
         telemetry: None,
         control: None,
         security: apply_security_patch(root.security.unwrap_or_default()),
+        identity: apply_identity_patch(root.identity.unwrap_or_default())?,
     };
 
     if let Some(brew) = root.brew {
@@ -209,6 +238,7 @@ struct TomlConfigRoot {
     telemetry: Option<CfgTelemetryDto>,
     command: Option<CfgControlDto>,
     security: Option<CfgSecurityDto>,
+    identity: Option<CfgIdentityDto>,
 
     #[serde(flatten)]
     extra: HashMap<String, Value>,
@@ -236,6 +266,7 @@ main_carrier = 1584
 freq_band = 4
 freq_offset = 0
 duplex_spacing = 4
+reverse_operation = false
 location_area = 1
 {}
 "#,
@@ -252,7 +283,8 @@ location_area = 1
 
     #[test]
     fn test_two_neighbor_cells() {
-        let toml = minimal_toml(r#"
+        let toml = minimal_toml(
+            r#"
 neighbor_cell_broadcast = 2
 
 [[cell_info.neighbor_cells_ca]]
@@ -271,7 +303,8 @@ cell_reselection_types_supported = 0
 neighbor_cell_synchronized = false
 cell_load_ca = 1
 main_carrier_number = 1586
-"#);
+"#,
+        );
         let cfg = from_toml_str(&toml).expect("parse failed");
         assert_eq!(cfg.cell.neighbor_cells_ca.len(), 2);
         assert_eq!(cfg.cell.neighbor_cells_ca[0].cell_identifier_ca, 1);
@@ -298,5 +331,189 @@ main_carrier_number = 1586
     fn test_unrecognized_cell_info_field_still_rejected() {
         let toml = minimal_toml("bogus_field = 42");
         assert!(from_toml_str(&toml).is_err(), "should reject unknown field");
+    }
+
+    #[test]
+    fn test_example_config_file_parses() {
+        let toml = include_str!("../../../../example_config/config.toml");
+        from_toml_str(toml).expect("example_config/config.toml should parse");
+    }
+
+    #[test]
+    fn test_identity_config_parses_manual_and_radioid() {
+        let toml = format!(
+            "{}\n{}",
+            minimal_toml(""),
+            r#"
+[identity]
+enabled = true
+cache_ttl_secs = 60
+cache_max_entries = 128
+
+[[identity.manual]]
+ssi = 2260571
+mnemonic = "YO6RZV"
+label = "Razvan"
+
+[identity.radioid]
+enabled = true
+timeout_secs = 2
+min_lookup_interval_ms = 500
+user_agent = "FlowStation test"
+api_token = "secret"
+"#
+        );
+        let cfg = from_toml_str(&toml).expect("parse failed");
+        assert!(cfg.identity.enabled);
+        assert_eq!(cfg.identity.cache_ttl_secs, 60);
+        assert_eq!(cfg.identity.cache_max_entries, 128);
+        assert_eq!(cfg.identity.manual[0].ssi, 2260571);
+        assert_eq!(cfg.identity.manual[0].mnemonic.as_deref(), Some("YO6RZV"));
+        assert!(cfg.identity.radioid.enabled);
+        assert_eq!(cfg.identity.radioid.min_lookup_interval_ms, 500);
+        assert!(cfg.identity.radioid.api_token.is_some());
+    }
+
+    #[test]
+    fn test_identity_rejects_unknown_nested_fields() {
+        let toml = format!(
+            "{}\n{}",
+            minimal_toml(""),
+            r#"
+[identity]
+enabled = true
+
+[identity.radioid]
+enabled = false
+bogus = "nope"
+"#
+        );
+        assert!(from_toml_str(&toml).is_err(), "should reject unknown identity.radioid field");
+    }
+
+    #[test]
+    fn test_sx1255_autocal_config_parses() {
+        let toml = r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "SoapySdr"
+
+[phy_io.soapysdr]
+rx_freq = 431362500
+tx_freq = 438362500
+
+[phy_io.soapysdr.sx1255_autocal]
+enabled = true
+interval_secs = 1800
+allow_periodic_temperature_read = true
+temperature_sensor = "temperature"
+startup_temperature_stabilize = true
+startup_temperature_interval_secs = 5
+startup_temperature_min_wait_secs = 20
+startup_temperature_max_wait_secs = 120
+startup_temperature_stable_delta_c = 0.4
+startup_temperature_stable_checks = 2
+min_temperature_delta_c = 3.5
+reference_temperature_c = 25.0
+temperature_reference_c = 52.0
+temperature_reference_raw = 203.6
+temp_ppm_per_c = 0.12
+allow_periodic_retune = true
+rf_loopback_startup_check = false
+rf_filter_profile = "tetra_clean"
+rf_loopback_startup_calibration = true
+rf_loopback_tone_hz = 25000.0
+rf_loopback_tone_amplitude = 0.75
+rf_loopback_settle_blocks = 12
+rf_loopback_capture_blocks = 16
+rf_loopback_calibration_attempts = 3
+rf_loopback_retry_delay_secs = 7
+rf_loopback_tx_gains = { DAC = 9.0, MIXER = 30.0 }
+rf_loopback_min_snr_db = 24.0
+rf_loopback_max_image_coeff = 0.25
+rf_loopback_max_dc = 0.2
+rf_loopback_apply_dc = true
+rf_loopback_apply_iq = false
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[cell_info]
+main_carrier = 1534
+freq_band = 4
+freq_offset = 12500
+duplex_spacing = 1
+reverse_operation = false
+location_area = 1
+"#;
+        let cfg = from_toml_str(toml).expect("parse failed");
+        let autocal = &cfg.phy_io.soapysdr.as_ref().expect("soapy config").sx1255_autocal;
+        assert!(autocal.enabled);
+        assert_eq!(autocal.interval_secs, 1800);
+        assert!(autocal.allow_periodic_temperature_read);
+        assert_eq!(autocal.temperature_sensor.as_deref(), Some("temperature"));
+        assert!(autocal.startup_temperature_stabilize);
+        assert_eq!(autocal.startup_temperature_interval_secs, 5);
+        assert_eq!(autocal.startup_temperature_min_wait_secs, 20);
+        assert_eq!(autocal.startup_temperature_max_wait_secs, 120);
+        assert_eq!(autocal.startup_temperature_stable_delta_c, 0.4);
+        assert_eq!(autocal.startup_temperature_stable_checks, 2);
+        assert_eq!(autocal.min_temperature_delta_c, 3.5);
+        assert_eq!(autocal.reference_temperature_c, Some(25.0));
+        assert_eq!(autocal.temperature_reference_c, Some(52.0));
+        assert_eq!(autocal.temperature_reference_raw, Some(203.6));
+        assert_eq!(autocal.temp_ppm_per_c, 0.12);
+        assert!(autocal.allow_periodic_retune);
+        assert!(!autocal.rf_loopback_startup_check);
+        assert_eq!(autocal.rf_filter_profile, "TETRA_CLEAN");
+        assert!(autocal.rf_loopback_startup_calibration);
+        assert_eq!(autocal.rf_loopback_tone_hz, 25000.0);
+        assert_eq!(autocal.rf_loopback_tone_amplitude, 0.75);
+        assert_eq!(autocal.rf_loopback_settle_blocks, 12);
+        assert_eq!(autocal.rf_loopback_capture_blocks, 16);
+        assert_eq!(autocal.rf_loopback_calibration_attempts, 3);
+        assert_eq!(autocal.rf_loopback_retry_delay_secs, 7);
+        assert_eq!(autocal.rf_loopback_tx_gains.get("DAC"), Some(&9.0));
+        assert_eq!(autocal.rf_loopback_tx_gains.get("MIXER"), Some(&30.0));
+        assert_eq!(autocal.rf_loopback_min_snr_db, 24.0);
+        assert_eq!(autocal.rf_loopback_max_image_coeff, 0.25);
+        assert_eq!(autocal.rf_loopback_max_dc, 0.2);
+        assert!(autocal.rf_loopback_apply_dc);
+        assert!(!autocal.rf_loopback_apply_iq);
+    }
+
+    #[test]
+    fn test_sx1255_autocal_rejects_unknown_nested_fields() {
+        let toml = r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "SoapySdr"
+
+[phy_io.soapysdr]
+rx_freq = 431362500
+tx_freq = 438362500
+
+[phy_io.soapysdr.sx1255_autocal]
+enabled = true
+bogus = "nope"
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[cell_info]
+main_carrier = 1534
+freq_band = 4
+freq_offset = 12500
+duplex_spacing = 1
+reverse_operation = false
+location_area = 1
+"#;
+        assert!(from_toml_str(toml).is_err(), "should reject unknown sx1255_autocal field");
     }
 }

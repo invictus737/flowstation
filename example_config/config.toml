@@ -50,6 +50,81 @@ rx_freq = 433025000
 # rx_gain_lna = 30.0
 
 ###############################################################################
+# OPTIONAL: SX1255 / SoapySX autocalibration and drift guard
+#
+# This is intentionally conservative. Startup calibration runs before normal
+# RX/TX streams are activated. Periodic checks are disabled by default because
+# SX1255 temperature measurement shares the RX ADC path on current hardware.
+#
+# Temperature-based retune is disabled until you provide a board-specific
+# temp_ppm_per_c coefficient. On SXceiver boards with a 38.4 MHz 0.5 ppm TCXO,
+# keep max_frequency_correction_hz small unless external RF measurement proves
+# otherwise. Leave allow_periodic_retune=false unless you have validated that
+# small active-stream retunes are acceptable on your station.
+#
+# [phy_io.soapysdr.sx1255_autocal]
+# enabled = true
+# startup = true
+# periodic = false
+# interval_secs = 3600
+#
+# Try SoapySDR device/channel sensors named like temperature/temp/sx1255_temp.
+# If your driver exposes a known exact key, set it here.
+# read_temperature = false
+# Periodic temperature reads are off by default because SX1255 temperature
+# measurement may share the RX ADC path. Set true only after validating that
+# your SoapySX driver/hardware can tolerate the scheduled measurement.
+# allow_periodic_temperature_read = false
+# temperature_sensor = "temperature"
+# temperature_sensor_keys = ["temperature", "temp", "sx1255_temperature", "sx1255_temp"]
+#
+# Optional startup-only warm-up. This uses only the SX1255 SoapySDR temperature
+# sensor before normal RX/TX streams are activated. It intentionally delays BS
+# startup until the board temperature is near stable, or until max wait expires.
+# startup_temperature_stabilize = false
+# startup_temperature_interval_secs = 10
+# startup_temperature_min_wait_secs = 60
+# startup_temperature_max_wait_secs = 300
+# startup_temperature_stable_delta_c = 0.5
+# startup_temperature_stable_checks = 3
+#
+# First successful reading becomes baseline unless reference_temperature_c is set.
+# min_temperature_delta_c = 2.0
+# reference_temperature_c = 25.0
+#
+# Frequency compensation. 0.0 disables retuning.
+# temp_ppm_per_c = 0.0
+# min_frequency_step_hz = 25.0
+# max_frequency_correction_hz = 300.0
+# allow_periodic_retune = false
+#
+# Generic SoapySDR correction hooks. Used only if the driver reports support.
+# enable_dc_offset_mode = true
+# rf_loopback_startup_check = true
+# rf_filter_profile = "TETRA_CLEAN"
+#
+# Startup RF loopback calibration. FlowStation transmits a short internal LB
+# tone, estimates RX DC and image leakage, and installs correction in the
+# enhanced SoapySX driver when available. If the driver lacks the API, it falls
+# back to software correction in FlowStation.
+# rf_loopback_startup_calibration = true
+# rf_loopback_tone_hz = 24000.0
+# rf_loopback_tone_amplitude = 0.35
+# rf_loopback_settle_blocks = 24
+# rf_loopback_capture_blocks = 32
+# rf_loopback_calibration_attempts = 1
+# rf_loopback_retry_delay_secs = 10
+# Optional temporary TX gains used only during loopback calibration. This lets
+# live TX stay low for desense testing while the internal LB tone remains strong.
+# rf_loopback_tx_gains = { DAC = 9.0, MIXER = 30.0 }
+# rf_loopback_min_snr_db = 20.0
+# rf_loopback_max_image_coeff = 0.95
+# rf_loopback_max_dc = 0.5
+# rf_loopback_apply_dc = true
+# rf_loopback_apply_iq = true
+###############################################################################
+
+###############################################################################
 
 [net_info]
 # Mobile Country Code (MCC) - identifies your country
@@ -232,6 +307,66 @@ voice_service = true
 #
 # [security]
 # issi_whitelist = [2260571, 2260572, 2260575]
+
+###############################################################################
+
+# OPTIONAL: SS-TPI identity / mnemonic-name support (FlowStation)
+#
+# When enabled, FlowStation attaches an SS-TPI INFORM Facility IE to supported
+# call-control PDUs so compatible terminals can display the current talking party.
+#
+# Lookup policy is intentionally conservative:
+# - manual entries always win;
+# - cached results are reused;
+# - RadioID is optional and disabled by default;
+# - remote lookup happens only at call setup or speaker/floor changes, never for
+#   traffic/audio frames.
+#
+# Mnemonic names are limited to 15 ASCII characters for the first implementation.
+# If no mnemonic is available, SS-TPI still carries the speaker SSI.
+#
+# [identity]
+# enabled = true
+#
+# Emit mnemonicName in SS-TPI INFORM when available and allowed.
+# Set to false if you want SS-TPI identity-only operation.
+# emit_mnemonic_name = true
+#
+# Local policy switch for terminals/subscribers allowed to receive mnemonic names.
+# subscription_allows_mnemonic = true
+#
+# Cache TTL for successful identity lookups.
+# cache_ttl_secs = 86400
+#
+# Cache TTL for misses/failed remote lookups. Keeps RadioID retries bounded.
+# negative_cache_ttl_secs = 3600
+#
+# Maximum in-memory identity cache entries.
+# cache_max_entries = 10000
+#
+# Manual overrides. Use these for known local ISSIs and for names that must not
+# depend on an external service.
+#
+# [[identity.manual]]
+# ssi = 2260571
+# mnemonic = "YO6RZV"
+# label = "Razvan"
+#
+# [[identity.manual]]
+# ssi = 2260572
+# mnemonic = "YO6TETRA"
+# label = "Local test radio"
+#
+# Optional RadioID.net lookup. Keep disabled unless you explicitly want remote
+# lookups. Use a clear User-Agent with contact info for your deployment.
+#
+# [identity.radioid]
+# enabled = false
+# endpoint = "https://radioid.net/api/dmr/user/"
+# timeout_secs = 3
+# min_lookup_interval_ms = 1000
+# user_agent = "FlowStation/0.1 contact:admin@example.org"
+# api_token = ""
 
 ###############################################################################
 

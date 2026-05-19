@@ -2,6 +2,7 @@ use super::*;
 
 impl CcBsSubentity {
     pub fn new(config: SharedConfig) -> Self {
+        let identity_resolver = Self::tpi_resolver_for_config(&config);
         CcBsSubentity {
             config,
             dltime: TdmaTime::default(),
@@ -13,6 +14,8 @@ impl CcBsSubentity {
             group_listeners: HashMap::new(),
             telemetry: None,
             echo_session: None,
+            tpi_contexts: HashMap::new(),
+            identity_resolver,
         }
     }
 
@@ -47,6 +50,8 @@ impl CcBsSubentity {
     }
 
     pub fn set_config(&mut self, config: SharedConfig) {
+        self.identity_resolver = Self::tpi_resolver_for_config(&config);
+        self.tpi_contexts.clear();
         self.config = config;
     }
 
@@ -97,6 +102,52 @@ impl CcBsSubentity {
                 tx_reporter: reporter,
             }),
         }
+    }
+
+    /// Send a refreshed group D-SETUP on the normal CMCE/MLE path.
+    ///
+    /// This is used when a Brew/network speaker takes over an existing group
+    /// call during hangtime or an active speaker change. The FACCH/STCH
+    /// D-TX GRANTED stays small and standards-safe; the optional SS-TPI
+    /// mnemonic is carried by D-SETUP where the PDU has enough capacity.
+    pub(super) fn send_group_d_setup_refresh(
+        &mut self,
+        queue: &mut MessageQueue,
+        call_id: u16,
+        source_issi: u32,
+        dest_gssi: u32,
+        usage: u8,
+        ts: u8,
+    ) {
+        let tpi_facility = self.tpi_inform_for_call(call_id);
+        let Some(cached) = self.cached_setups.get_mut(&call_id) else {
+            tracing::debug!(
+                "CMCE: skipping group D-SETUP refresh for call_id={} gssi={} source={} (no cached setup)",
+                call_id,
+                dest_gssi,
+                source_issi
+            );
+            return;
+        };
+        if cached.is_individual {
+            tracing::debug!(
+                "CMCE: skipping group D-SETUP refresh for call_id={} gssi={} source={} (cached setup is individual)",
+                call_id,
+                dest_gssi,
+                source_issi
+            );
+            return;
+        }
+
+        cached.dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
+        cached.pdu.calling_party_address_ssi = Some(source_issi);
+        cached.pdu.transmission_grant = TransmissionGrant::GrantedToOtherUser;
+        cached.pdu.transmission_request_permission = false;
+        cached.pdu.facility = tpi_facility;
+
+        let (sdu, chan_alloc) = Self::build_d_setup_prim(&cached.pdu, usage, ts, UlDlAssignment::Both);
+        let prim = Self::build_sapmsg(sdu, Some(chan_alloc), cached.dest_addr, Layer2Service::Unacknowledged, None);
+        queue.push_back(prim);
     }
 
     /// Build a SAP message with explicit LLC link context (handle/link_id/endpoint_id).
@@ -771,6 +822,7 @@ impl CcBsSubentity {
 
     /// Send D-TX GRANTED via FACCH stealing on the group traffic channel.
     pub(super) fn send_d_tx_granted_facch(&mut self, queue: &mut MessageQueue, call_id: u16, source_issi: u32, dest_gssi: u32, ts: u8) {
+        self.tpi_update_talker(call_id, source_issi);
         let pdu = DTxGranted {
             call_identifier: call_id,
             transmission_grant: TransmissionGrant::GrantedToOtherUser.into_raw() as u8,
@@ -793,7 +845,7 @@ impl CcBsSubentity {
         sdu.seek(0);
 
         let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
-        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, None);
+        let msg = Self::build_sapmsg_stealing_ul_dl(sdu, dest_addr, ts, None, UlDlAssignment::Dl);
         queue.push_back(msg);
     }
 
@@ -814,7 +866,7 @@ impl CcBsSubentity {
         sdu.seek(0);
 
         let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
-        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, None);
+        let msg = Self::build_sapmsg_stealing_ul_dl(sdu, dest_addr, ts, None, UlDlAssignment::Dl);
         queue.push_back(msg);
     }
 
@@ -884,6 +936,7 @@ impl CcBsSubentity {
 
         self.cached_setups.remove(&call_id);
         self.active_calls.remove(&call_id);
+        self.tpi_end_context(call_id);
         // Notify dashboard immediately — don't wait for tick_start_with_events
         self.emit(crate::net_telemetry::TelemetryEvent::GroupCallEnded { call_id, gssi: 0 });
     }
@@ -973,6 +1026,7 @@ impl CcBsSubentity {
             self.release_timeslot(ts);
         }
         self.cached_setups.remove(&call_id);
+        self.tpi_end_context(call_id);
 
         if (call.called_over_brew || call.calling_over_brew) && disconnect_cause != DisconnectCause::SwmiRequestedDisconnection {
             if let Some(brew_uuid) = call.brew_uuid {

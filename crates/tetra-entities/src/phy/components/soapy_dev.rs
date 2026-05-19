@@ -1,7 +1,9 @@
 //! Resampling, buffering and timestamp handling
 //! between SDR device and modulator/demodulator code.
 
+use crate::net_telemetry::{TelemetryEvent, TelemetrySink};
 use rustfft;
+use std::sync::Arc;
 use tetra_config::bluestation::SharedConfig;
 
 use tetra_pdus::phy::traits::rxtx_dev::RxSlotBits;
@@ -46,7 +48,7 @@ pub struct RxTxDevSoapySdr {
 type FftPlanner = rustfft::FftPlanner<RealSample>;
 
 impl RxTxDevSoapySdr {
-    pub fn new(cfg: &SharedConfig) -> Self {
+    pub fn new(cfg: &SharedConfig, telemetry: Option<TelemetrySink>) -> Self {
         let mut fft_planner = rustfft::FftPlanner::new();
 
         // TODO FIXME currently no MS and MON support in the below statement; need to fix
@@ -78,7 +80,7 @@ impl RxTxDevSoapySdr {
             ..Default::default()
         };
 
-        let mut sdr = soapyio::SoapyIo::new(cfg).unwrap();
+        let mut sdr = soapyio::SoapyIo::new(cfg, telemetry.clone()).unwrap();
 
         Self {
             rx_dsp: if sdr.rx_enabled() {
@@ -88,7 +90,7 @@ impl RxTxDevSoapySdr {
             },
 
             tx_dsp: if sdr.tx_enabled() {
-                Some(TxDsp::new(&mut fft_planner, &mut sdr, &phy_config))
+                Some(TxDsp::new(&mut fft_planner, &mut sdr, &phy_config, telemetry))
             } else {
                 None
             },
@@ -126,6 +128,15 @@ impl RxTxDevSoapySdr {
 }
 
 impl RxTxDev for RxTxDevSoapySdr {
+    fn set_rf_gain(&mut self, direction: &str, name: &str, value: f64) -> Result<f64, String> {
+        let dir = match direction {
+            "rx" | "RX" => soapysdr::Direction::Rx,
+            "tx" | "TX" => soapysdr::Direction::Tx,
+            other => return Err(format!("unsupported RF gain direction '{}'", other)),
+        };
+        self.sdr.set_rf_gain(dir, name, value)
+    }
+
     fn rxtx_timeslot<'a>(
         &'a mut self,
         tx_slot: &[TxSlotBits],
@@ -310,14 +321,18 @@ struct TxDsp {
     block_count: fcfb::BlockCount,
     initial_time: i64,
     modulators: Vec<ModulatorChannel>,
+    headroom: TxHeadroomLimiter,
+    tx_output: Vec<ComplexSample>,
+    monitor: Option<TxSignalMonitor>,
 }
 
 impl TxDsp {
-    fn new(fft_planner: &mut FftPlanner, sdr: &mut soapyio::SoapyIo, phy_config: &PhyConfig) -> Self {
+    fn new(fft_planner: &mut FftPlanner, sdr: &mut soapyio::SoapyIo, phy_config: &PhyConfig, telemetry: Option<TelemetrySink>) -> Self {
         let sdr_sample_rate = sdr.tx_sample_rate();
+        let center_frequency = sdr.tx_center_frequency().unwrap();
         let fcfb_params = fcfb::SynthesisOutputParameters {
             ifft_size: (sdr_sample_rate / 500.0).round() as usize,
-            center_frequency: sdr.tx_center_frequency().unwrap(),
+            center_frequency,
             sample_rate: sdr_sample_rate,
             overlap: fcfb::Overlap::O1_4,
         };
@@ -334,6 +349,9 @@ impl TxDsp {
             block_count: 0,
             initial_time: 0, // TODO: get it from RX
             modulators,
+            headroom: TxHeadroomLimiter::new(0.85),
+            tx_output: Vec::new(),
+            monitor: telemetry.map(|sink| TxSignalMonitor::new(fft_planner, sink, sdr_sample_rate as RealSample, center_frequency)),
         }
     }
 
@@ -386,15 +404,19 @@ impl TxDsp {
         }
 
         let tx_signal = self.fcfb.process();
+        self.headroom.apply(tx_signal, &mut self.tx_output);
+        if let Some(monitor) = &mut self.monitor {
+            monitor.observe(&self.tx_output, tx_slot, self.block_count);
+        }
 
         // TODO: compensate for delay of SDR
-        let sdr_sample_count = tx_signal.len() as SampleCount * self.block_count;
+        let sdr_sample_count = self.tx_output.len() as SampleCount * self.block_count;
 
         // Increment block count before calling sdr.transmit with ?,
         // so we do not end up producing the same block again even if transmit fails.
         self.block_count += 1;
 
-        sdr.transmit(tx_signal, Some(sdr_sample_count))?;
+        sdr.transmit(&self.tx_output, Some(sdr_sample_count))?;
 
         // tracing::trace!("Produced transmit block {} ({} samples in future)",
         //     self.block_count - 1,
@@ -402,6 +424,290 @@ impl TxDsp {
         // );
 
         Ok(true)
+    }
+}
+
+struct TxSignalMonitor {
+    sink: TelemetrySink,
+    sample_rate: RealSample,
+    center_frequency: f64,
+    fft: Arc<dyn rustfft::Fft<RealSample>>,
+    fft_buffer: Vec<ComplexSample>,
+    window: Vec<RealSample>,
+    constellation_history: Vec<ComplexSample>,
+    min_block_gap: fcfb::BlockCount,
+    next_block: fcfb::BlockCount,
+}
+
+impl TxSignalMonitor {
+    const FFT_LEN: usize = 512;
+    const CONSTELLATION_POINTS: usize = 192;
+    const CONSTELLATION_ENCODE_SCALE: RealSample = 32767.0 / 1.5;
+
+    fn new(fft_planner: &mut FftPlanner, sink: TelemetrySink, sample_rate: RealSample, center_frequency: f64) -> Self {
+        let fft = fft_planner.plan_fft_forward(Self::FFT_LEN);
+        let window = (0..Self::FFT_LEN)
+            .map(|i| {
+                let phase = 2.0 * std::f32::consts::PI * i as RealSample / (Self::FFT_LEN - 1) as RealSample;
+                0.5 - 0.5 * phase.cos()
+            })
+            .collect();
+        Self {
+            sink,
+            sample_rate,
+            center_frequency,
+            fft,
+            fft_buffer: vec![ComplexSample::ZERO; Self::FFT_LEN],
+            window,
+            constellation_history: Vec::with_capacity(Self::CONSTELLATION_POINTS),
+            min_block_gap: 33,
+            next_block: 0,
+        }
+    }
+
+    fn observe(&mut self, samples: &[ComplexSample], tx_slots: &[TxSlotBits], block_count: fcfb::BlockCount) {
+        if block_count < self.next_block || samples.len() < Self::FFT_LEN {
+            return;
+        }
+        self.next_block = block_count + self.min_block_gap;
+
+        let mut peak2: RealSample = 0.0;
+        let mut sum2: RealSample = 0.0;
+        for sample in samples {
+            let p = sample.norm_sqr();
+            peak2 = peak2.max(p);
+            sum2 += p;
+        }
+        let rms = (sum2 / samples.len() as RealSample).sqrt();
+        let rms_dbfs = 20.0 * rms.max(1.0e-12).log10();
+        let peak_dbfs = 20.0 * peak2.sqrt().max(1.0e-12).log10();
+
+        let start = (samples.len() - Self::FFT_LEN) / 2;
+        for i in 0..Self::FFT_LEN {
+            self.fft_buffer[i] = samples[start + i] * self.window[i];
+        }
+        self.fft.process(&mut self.fft_buffer);
+        let spectrum_db_tenths = (0..Self::FFT_LEN)
+            .map(|i| {
+                let idx = (i + Self::FFT_LEN / 2) % Self::FFT_LEN;
+                let mag = self.fft_buffer[idx].norm() / Self::FFT_LEN as RealSample;
+                (20.0 * mag.max(1.0e-12).log10() * 10.0)
+                    .round()
+                    .clamp(i16::MIN as RealSample, i16::MAX as RealSample) as i16
+            })
+            .collect();
+
+        let _ = tx_slots;
+        let constellation_iq = self.measured_constellation(samples);
+
+        self.sink.send(TelemetryEvent::TxMonitor {
+            sample_rate: self.sample_rate,
+            center_freq_hz: self.center_frequency,
+            rms_dbfs,
+            peak_dbfs,
+            spectrum_db_tenths,
+            constellation_iq,
+        });
+    }
+
+    fn measured_constellation(&mut self, samples: &[ComplexSample]) -> Vec<i16> {
+        let samples_per_symbol = self.sample_rate / 18_000.0;
+        if !samples_per_symbol.is_finite() || samples_per_symbol < 1.0 {
+            return Vec::new();
+        }
+
+        let Some((phase, rotation, gain)) = constellation_timing_rotation_gain(samples, samples_per_symbol) else {
+            return Vec::new();
+        };
+
+        let (sin_rot, cos_rot) = rotation.sin_cos();
+        let mut sample_at = phase;
+        while sample_at < samples.len() as RealSample {
+            let idx = sample_at.round() as usize;
+            if let Some(sample) = samples.get(idx) {
+                let derotated = ComplexSample {
+                    re: (sample.re * cos_rot + sample.im * sin_rot) / gain,
+                    im: (sample.im * cos_rot - sample.re * sin_rot) / gain,
+                };
+                if derotated.norm() > 0.05 {
+                    self.constellation_history.push(derotated);
+                }
+            }
+            sample_at += samples_per_symbol;
+        }
+
+        if self.constellation_history.len() > Self::CONSTELLATION_POINTS {
+            let excess = self.constellation_history.len() - Self::CONSTELLATION_POINTS;
+            self.constellation_history.drain(0..excess);
+        }
+
+        let mut points = Vec::with_capacity(self.constellation_history.len() * 2);
+        for sample in &self.constellation_history {
+            points.push(
+                (sample.re.clamp(-1.5, 1.5) * Self::CONSTELLATION_ENCODE_SCALE)
+                    .round()
+                    .clamp(i16::MIN as RealSample, i16::MAX as RealSample) as i16,
+            );
+            points.push(
+                (sample.im.clamp(-1.5, 1.5) * Self::CONSTELLATION_ENCODE_SCALE)
+                    .round()
+                    .clamp(i16::MIN as RealSample, i16::MAX as RealSample) as i16,
+            );
+        }
+        points
+    }
+}
+
+fn constellation_timing_rotation_gain(samples: &[ComplexSample], samples_per_symbol: RealSample) -> Option<(RealSample, RealSample, RealSample)> {
+    const STEPS: usize = 64;
+    let mut best: Option<(RealSample, RealSample, RealSample, RealSample)> = None;
+
+    for step in 0..STEPS {
+        let phase = samples_per_symbol * step as RealSample / STEPS as RealSample;
+        let points = constellation_points_for_phase(samples, samples_per_symbol, phase);
+        if points.len() < 8 {
+            continue;
+        }
+        let rotation = constellation_rotation(&points)?;
+        let (sin_rot, cos_rot) = rotation.sin_cos();
+        let mut radius_sum = 0.0;
+        let mut radius_count = 0usize;
+        for point in &points {
+            let derotated = ComplexSample {
+                re: point.re * cos_rot + point.im * sin_rot,
+                im: point.im * cos_rot - point.re * sin_rot,
+            };
+            let radius = derotated.norm();
+            if radius > 1.0e-5 {
+                radius_sum += radius;
+                radius_count += 1;
+            }
+        }
+        if radius_count < 8 {
+            continue;
+        }
+        let gain = radius_sum / radius_count as RealSample;
+        let mut err_sum = 0.0;
+        let mut err_count = 0usize;
+        for point in &points {
+            let derotated = ComplexSample {
+                re: (point.re * cos_rot + point.im * sin_rot) / gain,
+                im: (point.im * cos_rot - point.re * sin_rot) / gain,
+            };
+            let radius = derotated.norm();
+            if radius < 0.05 {
+                continue;
+            }
+            let angle = derotated.im.atan2(derotated.re).rem_euclid(std::f32::consts::TAU);
+            let ideal = (angle / (std::f32::consts::FRAC_PI_4)).round() * std::f32::consts::FRAC_PI_4;
+            let ideal_point = ComplexSample {
+                re: ideal.cos(),
+                im: ideal.sin(),
+            };
+            let err = derotated - ideal_point;
+            err_sum += err.norm_sqr();
+            err_count += 1;
+        }
+        if err_count < 8 {
+            continue;
+        }
+        let score = err_sum / err_count as RealSample;
+        match best {
+            Some((best_score, _, _, _)) if score >= best_score => {}
+            _ => best = Some((score, phase, rotation, gain.max(1.0e-5))),
+        }
+    }
+
+    best.map(|(_, phase, rotation, gain)| (phase, rotation, gain))
+}
+
+fn constellation_points_for_phase(samples: &[ComplexSample], samples_per_symbol: RealSample, phase: RealSample) -> Vec<ComplexSample> {
+    let mut points = Vec::new();
+    let mut sample_at = phase;
+    while sample_at < samples.len() as RealSample {
+        let idx = sample_at.round() as usize;
+        if let Some(sample) = samples.get(idx) {
+            points.push(*sample);
+        }
+        sample_at += samples_per_symbol;
+    }
+    points
+}
+
+fn constellation_rotation(points: &[ComplexSample]) -> Option<RealSample> {
+    let max_radius = points.iter().map(|point| point.norm()).fold(0.0, RealSample::max);
+    if max_radius <= 1.0e-6 {
+        return None;
+    }
+
+    let min_radius = max_radius * 0.25;
+    let mut sum_re = 0.0;
+    let mut sum_im = 0.0;
+    let mut weight_sum = 0.0;
+    for point in points {
+        let radius = point.norm();
+        if radius < min_radius {
+            continue;
+        }
+        let phase = point.im.atan2(point.re) * 8.0;
+        let weight = radius * radius;
+        sum_re += phase.cos() * weight;
+        sum_im += phase.sin() * weight;
+        weight_sum += weight;
+    }
+
+    if weight_sum <= 1.0e-9 {
+        None
+    } else {
+        Some(sum_im.atan2(sum_re) / 8.0)
+    }
+}
+
+struct TxHeadroomLimiter {
+    scale: RealSample,
+    target: RealSample,
+    target2: RealSample,
+    recovery_per_block: RealSample,
+    warn_cooldown_blocks: usize,
+}
+
+impl TxHeadroomLimiter {
+    fn new(target: RealSample) -> Self {
+        Self {
+            scale: 1.0,
+            target,
+            target2: target * target,
+            recovery_per_block: 1.0005,
+            warn_cooldown_blocks: 0,
+        }
+    }
+
+    fn apply(&mut self, input: &[ComplexSample], output: &mut Vec<ComplexSample>) {
+        let mut peak2: RealSample = 0.0;
+        for sample in input {
+            peak2 = peak2.max(sample.re * sample.re + sample.im * sample.im);
+        }
+
+        let desired_scale = if peak2 > self.target2 { self.target / peak2.sqrt() } else { 1.0 };
+
+        if desired_scale < self.scale {
+            self.scale = desired_scale;
+            if self.warn_cooldown_blocks == 0 {
+                tracing::warn!(
+                    "TX headroom limiter: reducing digital drive to {:.3} (block peak {:.3}, target {:.3})",
+                    self.scale,
+                    peak2.sqrt(),
+                    self.target
+                );
+                self.warn_cooldown_blocks = 6000;
+            }
+        } else {
+            self.scale = (self.scale * self.recovery_per_block).min(1.0);
+            self.warn_cooldown_blocks = self.warn_cooldown_blocks.saturating_sub(1);
+        }
+
+        output.clear();
+        output.extend(input.iter().map(|sample| *sample * self.scale));
     }
 }
 

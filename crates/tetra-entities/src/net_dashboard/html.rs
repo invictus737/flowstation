@@ -536,6 +536,83 @@ td code{
 }
 .ts-block.active .ts-activity-bar{transform:scaleX(1);}
 @keyframes ts-pulse{0%{opacity:1;}50%{opacity:0.4;}100%{opacity:1;}}
+.rf-grid{
+  display:grid;
+  grid-template-columns:minmax(360px,2fr) minmax(280px,1fr);
+  gap:16px;
+}
+.rf-panel{
+  background:var(--bg2);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:12px;
+}
+.rf-panel-title{
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text2);
+  margin-bottom:8px;
+  display:flex;
+  justify-content:space-between;
+  gap:12px;
+}
+.rf-canvas{
+  width:100%;
+  height:260px;
+  display:block;
+  background:#050607;
+  border:1px solid rgba(255,255,255,0.08);
+}
+.rf-canvas.small{height:320px;}
+.rf-metrics{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(140px,1fr));
+  gap:10px;
+  margin-bottom:16px;
+}
+.rf-metric{
+  background:var(--bg2);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:12px;
+}
+.rf-metric-label{
+  font-family:var(--mono);
+  font-size:10px;
+  color:var(--text3);
+  text-transform:uppercase;
+}
+.rf-metric-value{
+  font-family:var(--mono);
+  font-size:20px;
+  color:var(--accent);
+  margin-top:6px;
+}
+.rf-controls{
+  display:grid;
+  grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+  gap:10px;
+  margin-bottom:16px;
+}
+.rf-control{
+  background:var(--bg2);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:10px 12px;
+}
+.rf-control-head{
+  display:flex;
+  justify-content:space-between;
+  gap:10px;
+  align-items:center;
+  margin-bottom:8px;
+  font-family:var(--mono);
+  font-size:11px;
+  color:var(--text2);
+}
+.rf-control-value{color:var(--accent);font-weight:700;}
+.rf-control input[type="range"]{width:100%;}
+@media(max-width:900px){.rf-grid{grid-template-columns:1fr}.rf-canvas{height:220px}}
 </style>
 </head>
 <body>
@@ -568,6 +645,10 @@ td code{
     <div class="nav-item" onclick="showPage('lastheard',this)" id="nav-lastheard">
       <span class="nav-icon">🎙</span>
       <span class="nav-label" data-i18n="lastheard">LAST HEARD</span>
+    </div>
+    <div class="nav-item" onclick="showPage('rf',this)" id="nav-rf">
+      <span class="nav-icon">◫</span>
+      <span class="nav-label" data-i18n="rf">RF MONITOR/SET</span>
     </div>
     <div class="nav-item" onclick="showPage('log',this)" id="nav-log">
       <span class="nav-icon">📋</span>
@@ -771,6 +852,60 @@ td code{
       </div>
     </div>
 
+    <!-- ── RF MONITOR ── -->
+    <div class="page" id="page-rf">
+      <div class="rf-controls">
+        <div class="rf-control">
+          <div class="rf-control-head"><span>RX LNA</span><span class="rf-control-value" id="rf-gain-rx-LNA">30.0</span></div>
+          <input type="range" min="0" max="42" step="1" value="30" data-rf-dir="rx" data-rf-name="LNA">
+        </div>
+        <div class="rf-control">
+          <div class="rf-control-head"><span>RX PGA</span><span class="rf-control-value" id="rf-gain-rx-PGA">8.0</span></div>
+          <input type="range" min="0" max="16" step="1" value="8" data-rf-dir="rx" data-rf-name="PGA">
+        </div>
+        <div class="rf-control">
+          <div class="rf-control-head"><span>TX DAC</span><span class="rf-control-value" id="rf-gain-tx-DAC">6.0</span></div>
+          <input type="range" min="0" max="9" step="1" value="6" data-rf-dir="tx" data-rf-name="DAC">
+        </div>
+        <div class="rf-control">
+          <div class="rf-control-head"><span>TX MIXER</span><span class="rf-control-value" id="rf-gain-tx-MIXER">30.0</span></div>
+          <input type="range" min="0" max="30" step="1" value="30" data-rf-dir="tx" data-rf-name="MIXER">
+        </div>
+      </div>
+      <div class="rf-metrics">
+        <div class="rf-metric">
+          <div class="rf-metric-label">Center</div>
+          <div class="rf-metric-value" id="rf-center">—</div>
+        </div>
+        <div class="rf-metric">
+          <div class="rf-metric-label">RMS</div>
+          <div class="rf-metric-value" id="rf-rms">—</div>
+        </div>
+        <div class="rf-metric">
+          <div class="rf-metric-label">Peak</div>
+          <div class="rf-metric-value" id="rf-peak">—</div>
+        </div>
+        <div class="rf-metric">
+          <div class="rf-metric-label">Rate</div>
+          <div class="rf-metric-value" id="rf-rate">—</div>
+        </div>
+      </div>
+      <div class="rf-grid">
+        <div class="rf-panel">
+          <div class="rf-panel-title"><span id="rf-spectrum-title">TX DSP Spectrum (pre-PA)</span><span id="rf-age">waiting</span></div>
+          <canvas id="rf-spectrum" class="rf-canvas" width="900" height="260"></canvas>
+        </div>
+        <div class="rf-panel">
+          <div class="rf-panel-title"><span id="rf-constellation-title">TX DSP Measured Constellation</span><span id="rf-vector">full-scale IQ</span></div>
+          <canvas id="rf-constellation" class="rf-canvas small" width="420" height="260"></canvas>
+        </div>
+        <div class="rf-panel" style="grid-column:1/-1">
+          <div class="rf-panel-title"><span>TX Spectrum Waterfall</span><span>live / avg / max</span></div>
+          <canvas id="rf-waterfall" class="rf-canvas" width="1100" height="260"></canvas>
+        </div>
+      </div>
+    </div>
+
     <!-- ── LOG ── -->
     <div class="page" id="page-log">
       <div class="card">
@@ -905,7 +1040,7 @@ const LANGS={
   en:{
     bts_ip:'BTS IP',offline:'OFFLINE',online:'ONLINE',
     brew_online:'ONLINE',brew_offline:'OFFLINE',
-    stations:'Radios',calls:'Calls',lastheard:'Last Heard',log:'Log',config:'Config',
+    stations:'Radios',calls:'Calls',lastheard:'Last Heard',rf:'RF Monitor/Set',log:'Log',config:'Config',
     terminals:'Radios',registered:'registered',
     active_calls:'Active Calls',circuits:'circuits in use',
     registered_terminals:'Registered Radios',
@@ -1057,7 +1192,7 @@ const LANGS={
   hu:{
     bts_ip:'BTS IP',offline:'OFFLINE',online:'ONLINE',
     brew_online:'ONLINE',brew_offline:'OFFLINE',
-    stations:'Rádiók',calls:'Hívások',lastheard:'Utoljára Hallott',log:'Napló',config:'Konfig',
+    stations:'Rádiók',calls:'Hívások',lastheard:'Utoljára Hallott',rf:'RF Monitor/Set',log:'Napló',config:'Konfig',
     terminals:'Rádiók',registered:'regisztrált',
     active_calls:'Aktív hívások',circuits:'aktív áramkör',
     registered_terminals:'Regisztrált rádiók',
@@ -1100,7 +1235,7 @@ function applyLang(){
   document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.getAttribute('data-i18n')));
   document.querySelectorAll('[data-i18n-tab]').forEach(el=>el.textContent=t(el.getAttribute('data-i18n-tab')));
   // Update nav labels
-  ['stations','calls','lastheard','log','config','system'].forEach(p=>{
+  ['stations','calls','lastheard','rf','log','config','system'].forEach(p=>{
     const el=document.querySelector(`#nav-${p} .nav-label`);
     if(el)el.textContent=t(p);
   });
@@ -1140,7 +1275,7 @@ function closeMobileSidebar(){
 }
 
 // ── Page navigation ───────────────────────────────────────────────────────
-const PAGE_TITLES={stations:'stations',calls:'calls',lastheard:'lastheard',log:'log',config:'config',system:'system'};
+const PAGE_TITLES={stations:'stations',calls:'calls',lastheard:'lastheard',rf:'rf',log:'log',config:'config',system:'system'};
 function showPage(name,el){
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
@@ -1218,6 +1353,8 @@ function handleMsg(msg){
       });
       if(msg.log&&msg.log.length){document.getElementById('log-container').innerHTML='';msg.log.forEach(e=>appendLog(e));}
       setBrewStatus(!!msg.brew_online,msg.brew_version||0);
+      if(msg.rf_gains)applyRfGainSnapshot(msg.rf_gains);
+      if(msg.last_rf_loopback)updateRfMonitor({...msg.last_rf_loopback,type:'rf_loopback_monitor'});
       renderAll();break;
     case 'brew_status':
       setBrewStatus(!!msg.connected,msg.brew_version||0);break;
@@ -1253,6 +1390,10 @@ function handleMsg(msg){
       delete state.calls[msg.call_id];renderCalls();break;
     case 'ts_voice':
       tsVoice(msg.ts);break;
+    case 'tx_monitor':
+      updateRfMonitor(msg);break;
+    case 'rf_loopback_monitor':
+      updateRfMonitor(msg);break;
     case 'speaker_changed':
       if(state.calls[msg.call_id])state.calls[msg.call_id].active_speaker=msg.speaker_issi;
       if(msg.last_heard){pushLastHeard(msg.last_heard);renderLastHeard();}
@@ -1298,6 +1439,213 @@ function rssiColor(v){if(v==null)return'var(--text3)';if(v>-20)return'var(--acce
 function rssiPct(v){if(v==null)return 0;return Math.max(0,Math.min(100,(v+60)/50*100));}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 function renderAll(){renderStations();renderCalls();renderLastHeard();updateTsBlocks();}
+
+// ── RF Monitor ───────────────────────────────────────────────────────────
+const rfState={waterfall:[],avg:null,maxHold:null,lastTs:0,frames:0,rateTs:0,accumSource:null,accum:[],accumLimit:50000};
+const rfGainTimers={};
+function fmtMHz(v){return v?`${(v/1e6).toFixed(6)} MHz`:'—';}
+function rfGainLabelId(dir,name){return `rf-gain-${dir}-${name}`;}
+function sendRfGain(dir,name,value){
+  if(!ws||ws.readyState!==WebSocket.OPEN)return;
+  ws.send(JSON.stringify({type:'set_rf_gain',direction:dir,name,value}));
+}
+function applyRfGainSnapshot(gains){
+  for(const g of gains||[]){
+    const dir=String(g.direction||'').toLowerCase(),name=String(g.name||'').toUpperCase(),value=Number(g.value);
+    if(!dir||!name||!Number.isFinite(value))continue;
+    const input=document.querySelector(`input[data-rf-dir="${dir}"][data-rf-name="${name}"]`);
+    const label=document.getElementById(rfGainLabelId(dir,name));
+    if(input)input.value=String(value);
+    if(label)label.textContent=value.toFixed(1);
+  }
+}
+function queueRfGain(dir,name,value){
+  const id=rfGainLabelId(dir,name),label=document.getElementById(id);
+  if(label)label.textContent=Number(value).toFixed(1);
+  const key=`${dir}:${name}`;
+  clearTimeout(rfGainTimers[key]);
+  rfGainTimers[key]=setTimeout(()=>sendRfGain(dir,name,Number(value)),140);
+}
+function initRfGainControls(){
+  document.querySelectorAll('input[data-rf-dir][data-rf-name]').forEach(input=>{
+    const dir=input.dataset.rfDir,name=input.dataset.rfName;
+    const label=document.getElementById(rfGainLabelId(dir,name));
+    if(label)label.textContent=Number(input.value).toFixed(1);
+    input.addEventListener('input',()=>queueRfGain(dir,name,input.value));
+    input.addEventListener('change',()=>sendRfGain(dir,name,Number(input.value)));
+  });
+}
+function rfResizeCanvas(id){
+  const c=document.getElementById(id);if(!c)return null;
+  const r=c.getBoundingClientRect(),d=window.devicePixelRatio||1;
+  const w=Math.max(1,Math.floor(r.width*d)),h=Math.max(1,Math.floor(r.height*d));
+  if(c.width!==w||c.height!==h){c.width=w;c.height=h;}
+  return c;
+}
+function updateRfMonitor(msg){
+  rfState.lastTs=Date.now();rfState.frames++;
+  if(!rfState.rateTs)rfState.rateTs=rfState.lastTs;
+  const dt=(rfState.lastTs-rfState.rateTs)/1000;
+  if(dt>=1){document.getElementById('rf-rate').textContent=`${(rfState.frames/dt).toFixed(1)} fps`;rfState.frames=0;rfState.rateTs=rfState.lastTs;}
+  const isLoopback=msg.type==='rf_loopback_monitor';
+  if(rfState.accumSource!==msg.type){rfState.accumSource=msg.type;rfState.accum=[];}
+  const spectrumTitle=document.getElementById('rf-spectrum-title');
+  const constellationTitle=document.getElementById('rf-constellation-title');
+  if(spectrumTitle)spectrumTitle.textContent=isLoopback?'RF Loopback Spectrum':'TX DSP Spectrum (pre-PA)';
+  if(constellationTitle)constellationTitle.textContent=isLoopback?'RF Loopback IQ':'TX DSP Measured Constellation';
+  document.getElementById('rf-center').textContent=fmtMHz(msg.center_freq_hz);
+  document.getElementById('rf-rms').textContent=`${msg.rms_dbfs.toFixed(1)} dBFS`;
+  document.getElementById('rf-peak').textContent=`${msg.peak_dbfs.toFixed(1)} dBFS`;
+  const age=document.getElementById('rf-age');
+  if(age)age.textContent=isLoopback?`RF LB ${Number(msg.tone_hz||0).toFixed(0)} Hz @ ${Number(msg.amplitude||0).toFixed(2)}`:'pre-PA live';
+  const spectrum=(msg.spectrum_db_tenths||[]).map(v=>v/10);
+  updateRfTraces(spectrum);
+  drawRfSpectrum(spectrum,msg.sample_rate||600000);
+  drawRfConstellation(msg.constellation_iq||[],isLoopback);
+  rfState.waterfall.push(spectrum);
+  if(rfState.waterfall.length>180)rfState.waterfall.shift();
+  drawRfWaterfall();
+}
+function rfResetAccum(){rfState.accum=[];drawRfConstellation([],rfState.accumSource==='rf_loopback_monitor');}
+function drawRfGrid(ctx,w,h,yMin,yMax,fs){
+  ctx.fillStyle='#050607';ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle='rgba(255,255,255,0.14)';ctx.lineWidth=1;
+  ctx.fillStyle='rgba(255,255,255,0.75)';ctx.font='12px monospace';
+  for(let i=0;i<=6;i++){
+    const x=40+i*(w-50)/6;ctx.beginPath();ctx.moveTo(x,10);ctx.lineTo(x,h-24);ctx.stroke();
+    const off=(-fs/2+i*fs/6)/1000;ctx.fillText(`${off>=0?'+':''}${off.toFixed(0)}k`,x-22,h-7);
+  }
+  for(let i=0;i<=5;i++){
+    const y=10+i*(h-34)/5;ctx.beginPath();ctx.moveTo(40,y);ctx.lineTo(w-10,y);ctx.stroke();
+    const db=yMax-i*(yMax-yMin)/5;ctx.fillText(db.toFixed(0),6,y+4);
+  }
+}
+function updateRfTraces(spec){
+  if(!spec.length)return;
+  if(!rfState.avg||rfState.avg.length!==spec.length){
+    rfState.avg=spec.slice();
+    rfState.maxHold=spec.slice();
+    return;
+  }
+  for(let i=0;i<spec.length;i++){
+    rfState.avg[i]=rfState.avg[i]*0.86+spec[i]*0.14;
+    rfState.maxHold[i]=Math.max(rfState.maxHold[i]-0.08,spec[i]);
+  }
+}
+function rfY(v,h,yMin,yMax){
+  return 10+(yMax-Math.max(yMin,Math.min(yMax,v)))*(h-34)/(yMax-yMin);
+}
+function drawRfTrace(ctx,trace,w,h,yMin,yMax,color,width,alpha){
+  if(!trace||!trace.length)return;
+  ctx.save();ctx.globalAlpha=alpha;ctx.strokeStyle=color;ctx.lineWidth=width;ctx.beginPath();
+  for(let i=0;i<trace.length;i++){
+    const x=40+i*(w-50)/(trace.length-1),y=rfY(trace[i],h,yMin,yMax);
+    if(i===0)ctx.moveTo(x,y);else ctx.lineTo(x,y);
+  }
+  ctx.stroke();ctx.restore();
+}
+function drawRfSpectrum(spec,fs){
+  const c=rfResizeCanvas('rf-spectrum');if(!c||!spec.length)return;
+  const ctx=c.getContext('2d'),w=c.width,h=c.height,yMin=-120,yMax=0;
+  drawRfGrid(ctx,w,h,yMin,yMax,fs);
+  if(rfState.avg&&rfState.avg.length===spec.length){
+    const base=rfY(yMin,h,yMin,yMax);
+    ctx.fillStyle='rgba(255,215,64,0.13)';ctx.beginPath();
+    for(let i=0;i<rfState.avg.length;i++){
+      const x=40+i*(w-50)/(rfState.avg.length-1),y=rfY(rfState.avg[i],h,yMin,yMax);
+      if(i===0)ctx.moveTo(x,base);
+      ctx.lineTo(x,y);
+    }
+    ctx.lineTo(w-10,base);ctx.closePath();ctx.fill();
+  }
+  drawRfTrace(ctx,rfState.maxHold,w,h,yMin,yMax,'#ff3b30',1.5,0.95);
+  drawRfTrace(ctx,rfState.avg,w,h,yMin,yMax,'#ffd84a',2,0.9);
+  drawRfTrace(ctx,spec,w,h,yMin,yMax,'#f2f7ff',2,1);
+  ctx.fillStyle='rgba(255,255,255,0.78)';ctx.font='12px monospace';
+  ctx.fillText('LIVE',w-150,20);ctx.fillStyle='#ffd84a';ctx.fillText('AVG',w-108,20);ctx.fillStyle='#ff3b30';ctx.fillText('MAX',w-70,20);
+}
+function drawRfConstellation(iq,isLoopback=false){
+  const c=rfResizeCanvas('rf-constellation');if(!c)return;
+  const ctx=c.getContext('2d'),w=c.width,h=c.height,cx=w/2,cy=h/2,s=Math.min(w,h)*0.34;
+  ctx.fillStyle='#050607';ctx.fillRect(0,0,w,h);
+  ctx.strokeStyle='rgba(255,255,255,0.15)';ctx.beginPath();ctx.moveTo(cx,8);ctx.lineTo(cx,h-8);ctx.moveTo(8,cy);ctx.lineTo(w-8,cy);ctx.stroke();
+  ctx.strokeStyle='rgba(255,255,255,0.08)';
+  for(const r of [0.5,1.0]){ctx.beginPath();ctx.arc(cx,cy,s*r,0,Math.PI*2);ctx.stroke();}
+  if(!isLoopback)return drawTetraSymbolConstellation(ctx,cx,cy,s,iq);
+  ctx.fillStyle='rgba(76,216,255,0.82)';
+  let sum2=0,peak=0,count=0;
+  for(let i=0;i+1<iq.length;i+=2){
+    const ix=iq[i]/32767,iy=iq[i+1]/32767,x=cx+ix*s,y=cy-iy*s,r=Math.hypot(ix,iy);
+    sum2+=r*r;peak=Math.max(peak,r);count++;
+    ctx.fillRect(x-1.3,y-1.3,2.6,2.6);
+  }
+  const rms=count?Math.sqrt(sum2/count)*100:0,pk=peak*100;
+  const label=document.getElementById('rf-vector');
+  if(label)label.textContent=count?`RF LB RMS ${rms.toFixed(1)}% PK ${pk.toFixed(1)}%`:'RF LB';
+}
+function drawTetraSymbolConstellation(ctx,cx,cy,s,iq){
+  const ideals=[];
+  const iqScale=32767/1.5;
+  for(let k=0;k<8;k++){
+    const a=k*Math.PI/4;
+    ideals.push([Math.cos(a),Math.sin(a)]);
+  }
+  ctx.fillStyle='rgba(76,216,255,0.82)';
+  for(let i=0;i+1<iq.length;i+=2){
+    const ix=iq[i]/iqScale,iy=iq[i+1]/iqScale,r=Math.hypot(ix,iy);
+    if(r<0.01)continue;
+    const k=(Math.round(((Math.atan2(iy,ix)+Math.PI*2)%(Math.PI*2))/(Math.PI/4)))&7;
+    const p=ideals[k],ux=p[0],uy=p[1];
+    rfState.accum.push({x:ix,y:iy,err:Math.hypot(ix-ux,iy-uy)});
+  }
+  if(rfState.accum.length>rfState.accumLimit)rfState.accum.splice(0,rfState.accum.length-rfState.accumLimit);
+  let err2=0,peak=0,count=0;
+  for(const pt of rfState.accum){
+    const x=cx+pt.x*s,y=cy-pt.y*s;
+    const best=pt.err||0;
+    err2+=best*best;peak=Math.max(peak,best);count++;
+    if(x>4&&x<ctx.canvas.width-4&&y>4&&y<ctx.canvas.height-4){
+      ctx.fillRect(x-1.3,y-1.3,2.6,2.6);
+    }
+  }
+  ctx.save();
+  ctx.strokeStyle='rgba(0,212,168,0.72)';
+  ctx.fillStyle='rgba(0,212,168,0.45)';
+  ctx.lineWidth=Math.max(1,Math.floor((window.devicePixelRatio||1)));
+  for(const p of ideals){
+    const x=cx+p[0]*s,y=cy-p[1]*s,r=Math.max(4,s*0.025);
+    ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
+    ctx.beginPath();ctx.moveTo(x-r*1.6,y);ctx.lineTo(x+r*1.6,y);ctx.moveTo(x,y-r*1.6);ctx.lineTo(x,y+r*1.6);ctx.stroke();
+    ctx.beginPath();ctx.arc(x,y,2,0,Math.PI*2);ctx.fill();
+  }
+  ctx.restore();
+  const rms=count?Math.sqrt(err2/count)*100:0,pk=peak*100;
+  const label=document.getElementById('rf-vector');
+  if(label)label.textContent=count?`ACCUM ${count}  RMS ${rms.toFixed(1)}%  PK ${pk.toFixed(1)}%`:'ACCUM reset';
+}
+function wfColor(v){
+  const t=Math.max(0,Math.min(1,(v+110)/72));
+  const stops=[[5,8,28],[30,42,130],[0,160,220],[35,210,90],[245,220,55],[245,80,25],[255,245,210]];
+  const p=t*(stops.length-1),i=Math.min(stops.length-2,Math.floor(p)),f=p-i,a=stops[i],b=stops[i+1];
+  const r=Math.round(a[0]+(b[0]-a[0])*f),g=Math.round(a[1]+(b[1]-a[1])*f),bb=Math.round(a[2]+(b[2]-a[2])*f);
+  return `rgb(${r},${g},${bb})`;
+}
+function drawRfWaterfall(){
+  const c=rfResizeCanvas('rf-waterfall');if(!c)return;
+  const ctx=c.getContext('2d'),w=c.width,h=c.height,rows=rfState.waterfall.length;
+  ctx.fillStyle='#050607';ctx.fillRect(0,0,w,h);
+  if(!rows)return;
+  const rowH=Math.max(1,h/180),specLen=rfState.waterfall[0].length,colW=w/specLen;
+  for(let r=0;r<rows;r++){
+    const spec=rfState.waterfall[rows-1-r],y=h-(r+1)*rowH;
+    for(let i=0;i<spec.length;i++){
+      ctx.fillStyle=wfColor(spec[i]);
+      ctx.fillRect(i*colW,y,Math.ceil(colW),Math.ceil(rowH));
+    }
+  }
+}
+setInterval(()=>{if(rfState.lastTs){const el=document.getElementById('rf-age');if(el&&!el.textContent.startsWith('RF LB'))el.textContent=`${((Date.now()-rfState.lastTs)/1000).toFixed(1)}s`;};},250);
+setTimeout(()=>{const c=document.getElementById('rf-constellation');if(c)c.addEventListener('click',rfResetAccum);initRfGainControls();},0);
 
 // ── TS Visualizer ─────────────────────────────────────────────────────────
 // ts_state[ts-1]: {call_id, call_type, label, sub, voice_ts} (voice_ts = Date.now() of last frame)

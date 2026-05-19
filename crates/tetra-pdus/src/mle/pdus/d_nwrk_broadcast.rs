@@ -45,8 +45,7 @@ impl DNwrkBroadcast {
         // Type2
         let tetra_network_time = typed::parse_type2_generic(obit, buffer, 48, "tetra_network_time")?;
         // Type2
-        let number_of_ca_neighbour_cells =
-            typed::parse_type2_generic(obit, buffer, 3, "number_of_ca_neighbour_cells")?.map(|v| v as u8);
+        let number_of_ca_neighbour_cells = typed::parse_type2_generic(obit, buffer, 3, "number_of_ca_neighbour_cells")?.map(|v| v as u8);
 
         // Conditional: parse neighbour cell info elements
         let mut neighbour_cell_information_for_ca = Vec::new();
@@ -116,12 +115,7 @@ impl DNwrkBroadcast {
         typed::write_type2_generic(obit, buffer, self.tetra_network_time, 48);
 
         // Type2
-        typed::write_type2_generic(
-            obit,
-            buffer,
-            self.number_of_ca_neighbour_cells.map(|v| v as u64),
-            3,
-        );
+        typed::write_type2_generic(obit, buffer, self.number_of_ca_neighbour_cells.map(|v| v as u64), 3);
 
         // Conditional: write neighbour cell info elements (no P-bit per note 3)
         if self.number_of_ca_neighbour_cells.unwrap_or(0) > 0 {
@@ -133,6 +127,32 @@ impl DNwrkBroadcast {
         // MLE PDUs do not use M-bits (Annex E.2.1) — PDU ends after last Type 2 element
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_neighbour_broadcast_matches_legacy_wire_length() {
+        let pdu = DNwrkBroadcast {
+            cell_re_select_parameters: 0,
+            cell_load_ca: 0,
+            tetra_network_time: Some(0x5A522F18D7FF),
+            number_of_ca_neighbour_cells: Some(0),
+            neighbour_cell_information_for_ca: Vec::new(),
+        };
+
+        let mut buf = BitBuffer::new_autoexpand(128);
+        pdu.to_bitbuf(&mut buf).expect("serialize D-NWRK-BROADCAST");
+        assert_eq!(buf.get_pos(), 75);
+
+        buf.seek(0);
+        let decoded = DNwrkBroadcast::from_bitbuf(&mut buf).expect("parse D-NWRK-BROADCAST");
+        assert_eq!(decoded.tetra_network_time, pdu.tetra_network_time);
+        assert_eq!(decoded.number_of_ca_neighbour_cells, Some(0));
+        assert!(decoded.neighbour_cell_information_for_ca.is_empty());
     }
 }
 
