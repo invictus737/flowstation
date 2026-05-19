@@ -11,10 +11,13 @@ use tetra_saps::{SapMsg, SapMsgInner};
 use crate::net_control::{ControlCommand, ControlEndpoint, ControlResponse, RfGainDirection};
 use crate::phy::components::phy_io_file::{FileWriteMsg, PhyIoFileMode};
 use crate::phy::components::{burst_consts::*, slotter, train_consts::*};
+use crate::service_control::{ServiceAction, schedule_service_action};
 use crate::umac::subcomp::bs_sched::MACSCHED_TX_AHEAD;
 use crate::{MessageQueue, TetraEntityTrait};
 
 use super::components::phy_io_file::PhyIoFile;
+
+const PHY_CONSECUTIVE_RXTX_RESTART_THRESHOLD: u32 = 800;
 
 pub struct PhyBs<D: RxTxDev> {
     config: SharedConfig,
@@ -36,6 +39,7 @@ pub struct PhyBs<D: RxTxDev> {
 
     tick: u64,
     consecutive_rxtx_errors: u32,
+    rxtx_restart_scheduled: bool,
 }
 
 impl<D: RxTxDev> PhyBs<D> {
@@ -75,6 +79,7 @@ impl<D: RxTxDev> PhyBs<D> {
             control,
             tick: 0,
             consecutive_rxtx_errors: 0,
+            rxtx_restart_scheduled: false,
         }
     }
 
@@ -310,6 +315,7 @@ impl<D: RxTxDev> PhyBs<D> {
                     );
                 }
                 self.consecutive_rxtx_errors = 0;
+                self.rxtx_restart_scheduled = false;
                 rx
             }
             Err(err) => {
@@ -319,6 +325,14 @@ impl<D: RxTxDev> PhyBs<D> {
                     err,
                     self.consecutive_rxtx_errors
                 );
+                if self.consecutive_rxtx_errors >= PHY_CONSECUTIVE_RXTX_RESTART_THRESHOLD && !self.rxtx_restart_scheduled {
+                    self.rxtx_restart_scheduled = true;
+                    tracing::error!(
+                        "PHY: {} consecutive RX/TX errors; requesting service restart to recover SDR stream",
+                        self.consecutive_rxtx_errors
+                    );
+                    schedule_service_action(ServiceAction::Restart, std::time::Duration::from_millis(100));
+                }
                 return;
             }
         };
@@ -373,8 +387,8 @@ impl<D: RxTxDev> PhyBs<D> {
         }
     }
 
-    fn rx_tpc_prim(&mut self, _queue: &mut MessageQueue, _message: SapMsg) {
-        unimplemented!();
+    fn rx_tpc_prim(&mut self, _queue: &mut MessageQueue, message: SapMsg) {
+        tracing::warn!("PHY: dropping unsupported TPC primitive {:?}", message.msg);
     }
 }
 

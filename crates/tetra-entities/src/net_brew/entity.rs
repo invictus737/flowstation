@@ -29,12 +29,20 @@ use super::worker::{BrewCommand, BrewEvent, BrewWorker};
 
 /// Hangtime before releasing group call circuit to allow reuse without re-signaling.
 const GROUP_CALL_HANGTIME_DEFAULT_SECS: u64 = 5;
+const BREW_DISCONNECT_CAUSE_SWMI_REQUESTED: u8 = 14;
 
 // ─── Active call tracking ─────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ActiveCallKind {
+    Group,
+    Circuit,
+}
 
 /// Tracks the state of a single active Brew group call (currently transmitting)
 #[derive(Debug)]
 struct ActiveCall {
+    kind: ActiveCallKind,
     /// Brew session UUID
     uuid: Uuid,
     /// TETRA call identifier (14-bit) - None until NetworkCallReady received
@@ -457,11 +465,13 @@ impl BrewEntity {
         match update.action {
             BrewSubscriberAction::Register => {
                 self.subscriber_groups.entry(issi).or_insert_with(HashSet::new);
-                if routable {
+                if routable && self.connected {
                     tracing::info!("BrewEntity: subscriber register issi={} → REGISTER", issi);
                     let _ = self.command_sender.send(BrewCommand::RegisterSubscriber { issi });
-                } else {
+                } else if !routable {
                     tracing::debug!("BrewEntity: subscriber register issi={} (filtered, not sent to Brew)", issi);
+                } else {
+                    tracing::debug!("BrewEntity: subscriber register issi={} cached until Brew reconnect", issi);
                 }
             }
             BrewSubscriberAction::Deregister => {
@@ -470,7 +480,7 @@ impl BrewEntity {
                     .remove(&issi)
                     .map(|g| g.into_iter().collect())
                     .unwrap_or_default();
-                if routable {
+                if routable && self.connected {
                     tracing::info!("BrewEntity: subscriber deregister issi={} → DEAFFILIATE + DEREGISTER", issi);
                     if !existing_groups.is_empty() {
                         let _ = self.command_sender.send(BrewCommand::DeaffiliateGroups {
@@ -479,8 +489,10 @@ impl BrewEntity {
                         });
                     }
                     let _ = self.command_sender.send(BrewCommand::DeregisterSubscriber { issi });
-                } else {
+                } else if !routable {
                     tracing::debug!("BrewEntity: subscriber deregister issi={} (filtered, not sent to Brew)", issi);
+                } else {
+                    tracing::debug!("BrewEntity: subscriber deregister issi={} cached while Brew disconnected", issi);
                 }
             }
             BrewSubscriberAction::Affiliate => {
@@ -491,12 +503,18 @@ impl BrewEntity {
                         new_groups.push(gssi);
                     }
                 }
-                if !new_groups.is_empty() && routable {
+                if !new_groups.is_empty() && routable && self.connected {
                     tracing::info!("BrewEntity: affiliate issi={} → AFFILIATE groups={:?}", issi, new_groups);
                     let _ = self.command_sender.send(BrewCommand::AffiliateGroups { issi, groups: new_groups });
                 } else if !routable {
                     tracing::debug!(
                         "BrewEntity: affiliate issi={} groups={:?} (filtered, not sent to Brew)",
+                        issi,
+                        new_groups
+                    );
+                } else if !new_groups.is_empty() {
+                    tracing::debug!(
+                        "BrewEntity: affiliate issi={} groups={:?} cached until Brew reconnect",
                         issi,
                         new_groups
                     );
@@ -511,7 +529,7 @@ impl BrewEntity {
                         }
                     }
                 }
-                if !removed_groups.is_empty() && routable {
+                if !removed_groups.is_empty() && routable && self.connected {
                     tracing::info!("BrewEntity: deaffiliate issi={} → DEAFFILIATE groups={:?}", issi, removed_groups);
                     let _ = self.command_sender.send(BrewCommand::DeaffiliateGroups {
                         issi,
@@ -520,6 +538,12 @@ impl BrewEntity {
                 } else if !routable {
                     tracing::debug!(
                         "BrewEntity: deaffiliate issi={} groups={:?} (filtered, not sent to Brew)",
+                        issi,
+                        removed_groups
+                    );
+                } else if !removed_groups.is_empty() {
+                    tracing::debug!(
+                        "BrewEntity: deaffiliate issi={} groups={:?} cached while Brew disconnected",
                         issi,
                         removed_groups
                     );
@@ -653,6 +677,7 @@ impl BrewEntity {
 
             // Track the call - resources will be set by NetworkCallReady
             let call = ActiveCall {
+                kind: ActiveCallKind::Group,
                 uuid,
                 call_id: None, // Set by NetworkCallReady
                 ts: None,      // Set by NetworkCallReady
@@ -692,6 +717,7 @@ impl BrewEntity {
 
         // Track the call - resources will be set by NetworkCallReady
         let call = ActiveCall {
+            kind: ActiveCallKind::Group,
             uuid,
             call_id: None, // Set by NetworkCallReady
             ts: None,      // Set by NetworkCallReady
@@ -910,13 +936,21 @@ impl BrewEntity {
     fn release_all_calls(&mut self, queue: &mut MessageQueue) {
         // Request CMCE to end all active network calls
         let calls: Vec<(Uuid, ActiveCall)> = self.active_calls.drain().collect();
-        for (uuid, _) in calls {
+        for (uuid, call) in calls {
             self.dl_jitter.remove(&uuid);
+            self.draining_jitter.remove(&uuid);
+            let msg = match call.kind {
+                ActiveCallKind::Group => CallControl::NetworkCallEnd { brew_uuid: uuid },
+                ActiveCallKind::Circuit => CallControl::NetworkCircuitRelease {
+                    brew_uuid: uuid,
+                    cause: BREW_DISCONNECT_CAUSE_SWMI_REQUESTED,
+                },
+            };
             queue.push_back(SapMsg {
                 sap: Sap::Control,
                 src: TetraEntity::Brew,
                 dest: TetraEntity::Cmce,
-                msg: SapMsgInner::CmceCallControl(CallControl::NetworkCallEnd { brew_uuid: uuid }),
+                msg: SapMsgInner::CmceCallControl(msg),
             });
         }
 
@@ -924,6 +958,7 @@ impl BrewEntity {
         self.hanging_calls.clear();
         self.dl_jitter.clear();
         self.draining_jitter.clear();
+        self.ul_forwarded.clear();
     }
 
     /// Handle NetworkCallReady response from CMCE
@@ -1134,6 +1169,7 @@ impl TetraEntityTrait for BrewEntity {
                 // Without this entry handle_voice_frame silently drops all incoming DL audio because
                 // it looks up the uuid in active_calls and finds nothing.
                 self.active_calls.entry(brew_uuid).or_insert_with(|| ActiveCall {
+                    kind: ActiveCallKind::Circuit,
                     uuid: brew_uuid,
                     call_id: Some(call_id),
                     ts: Some(ts),

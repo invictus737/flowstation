@@ -873,7 +873,8 @@ impl UmacBs {
             return;
         };
         if let Some(_aie_info) = self.defrag.get_aie_info(slot_owner, msg_dltime) {
-            unimplemented!("rx_mac_end_ul: Encryption not supported");
+            tracing::warn!("rx_mac_end_ul: dropping encrypted MAC-END-UL; encryption is not supported");
+            return;
         }
 
         // Insert last fragment and retrieve finalized block
@@ -990,7 +991,8 @@ impl UmacBs {
             return;
         };
         if let Some(_aie_info) = self.defrag.get_aie_info(slot_owner, msg_dltime) {
-            unimplemented!("rx_mac_end_hu: Encryption not supported");
+            tracing::warn!("rx_mac_end_hu: dropping encrypted MAC-END-HU; encryption is not supported");
+            return;
         }
 
         // Insert last fragment and retrieve finalized block
@@ -1110,7 +1112,7 @@ impl UmacBs {
             return;
         };
 
-        let _pdu = match MacUBlck::from_bitbuf(&mut prim.pdu) {
+        let pdu = match MacUBlck::from_bitbuf(&mut prim.pdu) {
             Ok(pdu) => {
                 tracing::debug!("<- {:?}", pdu);
                 pdu
@@ -1121,9 +1123,7 @@ impl UmacBs {
             }
         };
 
-        // Handle reservation if present
-        // TODO implement slightly different handling since enum is not the same.
-        unimplemented!();
+        tracing::warn!("UMAC: dropping unsupported MAC-U-BLCK uplink PDU {:?}", pdu);
     }
 
     fn rx_ul_tma_unitdata_req(&mut self, _queue: &mut MessageQueue, message: SapMsg) {
@@ -1690,7 +1690,7 @@ impl TetraEntityTrait for UmacBs {
                 self.rx_tlmb_prim(queue, message);
             }
             Sap::TlmcSap => {
-                unimplemented!();
+                tracing::warn!("UMAC: dropping unsupported TLMC primitive {:?}", message.msg);
             }
             Sap::Control => {
                 self.rx_control(queue, message);

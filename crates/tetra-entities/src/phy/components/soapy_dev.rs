@@ -278,7 +278,8 @@ impl RxDsp {
 
                 // Repeat reads until the correct number of samples has been skipped.
                 while samples_to_skip > 0 {
-                    let result = sdr.receive(&mut self.rx_buffer[0..samples_to_skip as usize])?;
+                    let skip_now = samples_to_skip.min(self.rx_buffer.len() as SampleCount) as usize;
+                    let result = sdr.receive(&mut self.rx_buffer[0..skip_now])?;
                     samples_to_skip -= result.len as SampleCount;
                 }
             } else {

@@ -22,6 +22,7 @@ use tetra_entities::net_telemetry::{
     TELEMETRY_HEARTBEAT_INTERVAL, TELEMETRY_HEARTBEAT_TIMEOUT, TELEMETRY_PROTOCOL_VERSION, TelemetrySource, telemetry_channel,
 };
 use tetra_entities::network::transports::websocket::{WebSocketTransport, WebSocketTransportConfig};
+use tetra_entities::service_control::{install_lifecycle_control, requested_exit_code};
 use tetra_entities::{
     cmce::cmce_bs::CmceBs,
     llc::llc_bs_ms::Llc,
@@ -325,6 +326,7 @@ fn main() {
 
     // Set up Ctrl+C handler for graceful shutdown
     let is_running = Arc::new(AtomicBool::new(true));
+    install_lifecycle_control(is_running.clone());
     let is_running_clone = is_running.clone();
     ctrlc::set_handler(move || {
         is_running_clone.store(false, Ordering::SeqCst);
@@ -335,4 +337,7 @@ fn main() {
     router.run_stack(None, Some(is_running));
 
     // router drops here → entities are dropped, networked entities disconnect.
+    if let Some(code) = requested_exit_code() {
+        std::process::exit(code);
+    }
 }

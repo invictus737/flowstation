@@ -8,6 +8,8 @@ use tetra_saps::SapMsg;
 
 use crate::TetraEntityTrait;
 
+const MAX_MESSAGES_PER_DRAIN: usize = 20_000;
+
 #[derive(Default)]
 pub enum MessagePrio {
     Immediate,
@@ -125,8 +127,20 @@ impl MessageRouter {
     }
 
     pub fn deliver_all_messages(&mut self) {
+        let mut delivered = 0usize;
         while !self.msg_queue.messages.is_empty() {
+            if delivered >= MAX_MESSAGES_PER_DRAIN {
+                let dropped = self.msg_queue.messages.len();
+                self.msg_queue.messages.clear();
+                tracing::error!(
+                    "MessageRouter: dropped {} queued message(s) after hitting drain safety limit {}",
+                    dropped,
+                    MAX_MESSAGES_PER_DRAIN
+                );
+                break;
+            }
             self.deliver_message();
+            delivered += 1;
         }
     }
 

@@ -1,8 +1,20 @@
 use std::process::{Command, Output};
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
 
 const SERVICE_UNIT_ENV: &str = "FLOWSTATION_SERVICE_UNIT";
 const DEFAULT_SERVICE_UNIT: &str = "tetra-bluestation.service";
+const NO_EXIT_REQUESTED: i32 = i32::MIN;
+const RESTART_EXIT_CODE: i32 = 75;
+
+struct LifecycleControl {
+    running: Arc<AtomicBool>,
+    exit_code: AtomicI32,
+}
+
+static LIFECYCLE_CONTROL: OnceLock<LifecycleControl> = OnceLock::new();
 
 #[derive(Debug, Clone, Copy)]
 pub enum ServiceAction {
@@ -26,6 +38,19 @@ impl ServiceAction {
     }
 }
 
+pub fn install_lifecycle_control(running: Arc<AtomicBool>) {
+    let _ = LIFECYCLE_CONTROL.set(LifecycleControl {
+        running,
+        exit_code: AtomicI32::new(NO_EXIT_REQUESTED),
+    });
+}
+
+pub fn requested_exit_code() -> Option<i32> {
+    let lifecycle = LIFECYCLE_CONTROL.get()?;
+    let code = lifecycle.exit_code.load(Ordering::SeqCst);
+    (code != NO_EXIT_REQUESTED).then_some(code)
+}
+
 pub fn schedule_service_action(action: ServiceAction, delay: Duration) {
     let unit = resolve_service_unit();
     let service_user = service_user(&unit).unwrap_or_else(|| "unknown".to_string());
@@ -41,9 +66,24 @@ pub fn schedule_service_action(action: ServiceAction, delay: Duration) {
         .name("service-control".into())
         .spawn(move || {
             std::thread::sleep(delay);
-            match run_service_action(action, &unit) {
-                Ok(()) => tracing::info!("Service control: {} requested for {}", action.label(), unit),
-                Err(e) => tracing::error!("Service control: {} failed for {}: {}", action.label(), unit, e),
+            if let Some(lifecycle) = LIFECYCLE_CONTROL.get() {
+                let exit_code = match action {
+                    ServiceAction::Restart => RESTART_EXIT_CODE,
+                    ServiceAction::Stop => 0,
+                };
+                lifecycle.exit_code.store(exit_code, Ordering::SeqCst);
+                lifecycle.running.store(false, Ordering::SeqCst);
+                tracing::info!(
+                    "Service control: {} requested internally for {} with exit code {}",
+                    action.label(),
+                    unit,
+                    exit_code
+                );
+            } else {
+                match run_service_action(action, &unit) {
+                    Ok(()) => tracing::info!("Service control: {} requested for {}", action.label(), unit),
+                    Err(e) => tracing::error!("Service control: {} failed for {}: {}", action.label(), unit, e),
+                }
             }
         })
         .ok();

@@ -1,5 +1,6 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -61,29 +62,118 @@ impl UpdateState {
 
 type SharedUpdateState = Arc<Mutex<UpdateState>>;
 
-/// Run git pull + cargo build --release in a background thread.
+const UPDATE_SOURCE_DIR_ENV: &str = "FLOWSTATION_UPDATE_SOURCE_DIR";
+const MAX_CONFIG_BODY_BYTES: usize = 256 * 1024;
+const MAX_PROFILE_BODY_BYTES: usize = 1024;
+
+fn find_git_source_dir(config_path: &str) -> Option<PathBuf> {
+    if let Ok(value) = std::env::var(UPDATE_SOURCE_DIR_ENV) {
+        let path = PathBuf::from(value);
+        if path.join(".git").exists() {
+            return Some(path);
+        }
+        tracing::warn!(
+            "UPDATE: ignoring {} because it does not point at a git checkout: {}",
+            UPDATE_SOURCE_DIR_ENV,
+            path.display()
+        );
+    }
+
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        candidates.push(exe);
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd);
+    }
+    candidates.push(PathBuf::from(config_path));
+
+    for candidate in candidates {
+        let start = if candidate.is_file() {
+            candidate.parent().map(Path::to_path_buf)
+        } else {
+            Some(candidate)
+        };
+        if let Some(mut dir) = start {
+            loop {
+                if dir.join(".git").exists() {
+                    return Some(dir);
+                }
+                if !dir.pop() {
+                    break;
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn resolve_update_target(update: &SharedUpdateState, src_dir: &Path) -> Option<(String, String, String)> {
+    let upstream = run_cmd_output(
+        update,
+        "git",
+        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        src_dir,
+    )?
+    .trim()
+    .to_string();
+
+    let Some((remote, branch)) = upstream.split_once('/') else {
+        update
+            .lock()
+            .unwrap()
+            .append(&format!("ERROR: unsupported upstream ref '{}'", upstream));
+        update.lock().unwrap().finish(false);
+        return None;
+    };
+
+    Some((remote.to_string(), branch.to_string(), upstream))
+}
+
+/// Run a command, stream stdout+stderr into the log, return Ok(stdout) or Err.
+fn run_cmd_output(update: &SharedUpdateState, program: &str, args: &[&str], dir: &Path) -> Option<String> {
+    let line = format!("$ {} {}", program, args.join(" "));
+    tracing::info!("UPDATE: {}", line);
+    update.lock().unwrap().append(&line);
+
+    match std::process::Command::new(program).args(args).current_dir(dir).output() {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            for l in stdout.lines() {
+                update.lock().unwrap().append(l);
+            }
+            for l in stderr.lines() {
+                update.lock().unwrap().append(l);
+            }
+            if out.status.success() {
+                Some(stdout)
+            } else {
+                update.lock().unwrap().append(&format!("ERROR: exited with {}", out.status));
+                update.lock().unwrap().finish(false);
+                None
+            }
+        }
+        Err(e) => {
+            update.lock().unwrap().append(&format!("ERROR: failed to run '{}': {}", program, e));
+            update.lock().unwrap().finish(false);
+            None
+        }
+    }
+}
+
+/// Fast-forward the service user's checked-out branch and build in a background thread.
 /// Steps:
 ///   1. Backup config.toml → config.toml.bak
-///   2. git -C <src_dir> pull
+///   2. git fetch the configured upstream branch
 ///   3. cargo build --release
 ///   4. Restart the current systemd service (after short delay, gives 200 OK time to reach browser)
 ///
-/// src_dir is derived from the binary path: the directory containing the running binary's
-/// parent (i.e. target/release is sibling of src root), so we go up two levels.
+/// The source checkout is taken from FLOWSTATION_UPDATE_SOURCE_DIR when set, then discovered by
+/// walking upward from the running binary, current directory, and config path. If no .git checkout
+/// is found, the update fails explicitly instead of accidentally running in / or /home.
 fn run_update(update: SharedUpdateState, config_path: String) {
-    // Derive source root from the running binary's location.
-    // Binary lives at  <src_root>/target/release/bluestation-bs
-    // so src_root = binary_path.parent().parent().parent()
-    let src_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| {
-            p.parent()
-                .and_then(|p| p.parent())
-                .and_then(|p| p.parent())
-                .map(|p| p.to_path_buf())
-        })
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-
     macro_rules! log {
         ($update:expr, $($arg:tt)*) => {{
             let line = format!($($arg)*);
@@ -92,58 +182,39 @@ fn run_update(update: SharedUpdateState, config_path: String) {
         }};
     }
 
-    /// Run a command, stream stdout+stderr into the log, return Ok(stdout) or Err.
-    fn run_cmd_output(update: &SharedUpdateState, program: &str, args: &[&str], dir: &std::path::Path) -> Option<String> {
-        let line = format!("$ {} {}", program, args.join(" "));
-        tracing::info!("UPDATE: {}", line);
-        update.lock().unwrap().append(&line);
-
-        match std::process::Command::new(program).args(args).current_dir(dir).output() {
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                for l in stdout.lines() {
-                    update.lock().unwrap().append(l);
-                }
-                for l in stderr.lines() {
-                    update.lock().unwrap().append(l);
-                }
-                if out.status.success() {
-                    Some(stdout)
-                } else {
-                    update.lock().unwrap().append(&format!("ERROR: exited with {}", out.status));
-                    update.lock().unwrap().finish(false);
-                    None
-                }
-            }
-            Err(e) => {
-                update.lock().unwrap().append(&format!("ERROR: failed to run '{}': {}", program, e));
-                update.lock().unwrap().finish(false);
-                None
-            }
-        }
-    }
-
     log!(update, "=== FlowStation OTA Update ===");
+
+    let Some(src_dir) = find_git_source_dir(&config_path) else {
+        log!(
+            update,
+            "ERROR: no git checkout found. Set {} to the FlowStation source checkout used by the service user.",
+            UPDATE_SOURCE_DIR_ENV
+        );
+        update.lock().unwrap().finish(false);
+        return;
+    };
     log!(update, "Source dir: {}", src_dir.display());
 
-    let src_str = src_dir.to_str().unwrap_or(".");
+    let Some((remote, branch, upstream)) = resolve_update_target(&update, &src_dir) else {
+        return;
+    };
+    log!(update, "Tracking: {}", upstream);
 
     // Step 1: fetch remote without merging — just update refs
     log!(update, "--- Checking remote for updates ---");
-    if run_cmd_output(&update, "git", &["-C", src_str, "fetch", "origin", "main"], &src_dir).is_none() {
+    if run_cmd_output(&update, "git", &["fetch", &remote, &branch], &src_dir).is_none() {
         return;
     }
 
-    // Step 2: compare local HEAD with remote origin/main
-    let local_commit = run_cmd_output(&update, "git", &["-C", src_str, "rev-parse", "HEAD"], &src_dir)
+    // Step 2: compare local HEAD with its configured upstream.
+    let local_commit = run_cmd_output(&update, "git", &["rev-parse", "HEAD"], &src_dir)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if local_commit.is_empty() {
         return;
     }
 
-    let remote_commit = run_cmd_output(&update, "git", &["-C", src_str, "rev-parse", "origin/main"], &src_dir)
+    let remote_commit = run_cmd_output(&update, "git", &["rev-parse", &upstream], &src_dir)
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
     if remote_commit.is_empty() {
@@ -160,12 +231,7 @@ fn run_update(update: SharedUpdateState, config_path: String) {
     }
 
     // Step 3: show what changed
-    let _ = run_cmd_output(
-        &update,
-        "git",
-        &["-C", src_str, "log", "--oneline", &format!("HEAD..origin/main")],
-        &src_dir,
-    );
+    let _ = run_cmd_output(&update, "git", &["log", "--oneline", &format!("HEAD..{}", upstream)], &src_dir);
 
     // Step 4: backup config before touching anything
     let backup_path = format!("{}.bak", config_path);
@@ -176,7 +242,7 @@ fn run_update(update: SharedUpdateState, config_path: String) {
 
     // Step 5: fast-forward merge (only changed files are touched on disk)
     log!(update, "--- git merge (fast-forward only) ---");
-    if run_cmd_output(&update, "git", &["-C", src_str, "merge", "--ff-only", "origin/main"], &src_dir).is_none() {
+    if run_cmd_output(&update, "git", &["merge", "--ff-only", &upstream], &src_dir).is_none() {
         return;
     }
 
@@ -593,6 +659,10 @@ fn handle_connection(
                     .unwrap_or(0);
             }
         }
+        if content_length > MAX_PROFILE_BODY_BYTES {
+            http_response(buf.into_inner(), 413, "Profile request too large");
+            return;
+        }
         let mut body = vec![0u8; content_length];
         let _ = buf.read_exact(&mut body);
         let profile = String::from_utf8_lossy(&body).trim().to_string();
@@ -643,10 +713,19 @@ fn handle_connection(
         tracing::info!("Dashboard: OTA update triggered");
         let update_clone = Arc::clone(&update_state);
         let cfg_clone = config_path.clone();
-        std::thread::Builder::new()
+        match std::thread::Builder::new()
             .name("ota-update".into())
             .spawn(move || run_update(update_clone, cfg_clone))
-            .ok();
+        {
+            Ok(_) => {}
+            Err(e) => {
+                let mut u = update_state.lock().unwrap();
+                u.append(&format!("ERROR: failed to spawn OTA update thread: {}", e));
+                u.finish(false);
+                http_response(buf.into_inner(), 500, "Failed to start update");
+                return;
+            }
+        }
         http_response(buf.into_inner(), 200, "OK");
     } else if req_line.contains("GET /api/config/backup") {
         let mut buf = BufReader::new(stream);
@@ -695,6 +774,10 @@ fn handle_connection(
                     .parse()
                     .unwrap_or(0);
             }
+        }
+        if content_length > MAX_CONFIG_BODY_BYTES {
+            http_response(buf.into_inner(), 413, "Config body too large");
+            return;
         }
         let mut body = vec![0u8; content_length];
         let _ = buf.read_exact(&mut body);
@@ -828,7 +911,7 @@ fn handle_ws_command(
     state: &DashboardState,
     cmd_tx: &Arc<Mutex<Option<CmdSender>>>,
     phy_cmd_tx: &Arc<Mutex<Option<CmdSender>>>,
-    update_state: &SharedUpdateState,
+    _update_state: &SharedUpdateState,
 ) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
@@ -901,22 +984,7 @@ fn handle_ws_command(
             tracing::info!("Dashboard: shutdown service requested");
             send_cmd(ControlCommand::ShutdownService);
         }
-        Some("update") => {
-            let mut u = update_state.lock().unwrap();
-            if u.phase == UpdatePhase::Running {
-                tracing::warn!("Dashboard: update already in progress, ignoring");
-                return;
-            }
-            u.start();
-            drop(u);
-            tracing::info!("Dashboard: OTA update triggered via WS");
-            // config_path not available here; caller must use POST /api/update instead
-            // This WS variant is for UI convenience — it signals the browser to poll /api/update/status
-            // The actual update must be triggered via POST /api/update from JS first.
-            // Here we just ack that status polling should begin.
-            let mut s = state.write().unwrap();
-            s.push_log("INFO", "OTA update started — check /api/update/status for progress".to_string());
-        }
+        Some("update") => tracing::warn!("Dashboard: ignoring WS update command; use POST /api/update"),
         Some("sds") => {
             let dest = v.get("dest_issi").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
             let msg_text = v.get("message").and_then(|m| m.as_str()).unwrap_or("").to_string();

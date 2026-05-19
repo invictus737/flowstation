@@ -231,6 +231,9 @@ impl<T: NetworkTransport> BrewWorker<T> {
             match self.transport.connect() {
                 Ok(()) => {
                     tracing::info!("BrewWorker: transport connected");
+                    if !self.reset_for_new_transport_session() {
+                        return;
+                    }
                     let _ = self.event_sender.send(BrewEvent::Connected {
                         server_version: self.transport.server_brew_version(),
                     });
@@ -288,6 +291,34 @@ impl<T: NetworkTransport> BrewWorker<T> {
             }
         }
         self.transport.disconnect();
+    }
+
+    fn reset_for_new_transport_session(&mut self) -> bool {
+        self.subscriber_groups.clear();
+        self.pending_sds.clear();
+
+        let mut dropped = 0usize;
+        loop {
+            match self.command_receiver.try_recv() {
+                Ok(BrewCommand::Disconnect) => {
+                    tracing::info!("BrewWorker: disconnect requested while reconnecting");
+                    self.transport.disconnect();
+                    return false;
+                }
+                Ok(_) => dropped += 1,
+                Err(crossbeam_channel::TryRecvError::Empty) => break,
+                Err(crossbeam_channel::TryRecvError::Disconnected) => {
+                    tracing::info!("BrewWorker: command channel closed while reconnecting");
+                    self.transport.disconnect();
+                    return false;
+                }
+            }
+        }
+
+        if dropped > 0 {
+            tracing::warn!("BrewWorker: dropped {} stale command(s) queued before reconnect resync", dropped);
+        }
+        true
     }
 
     /// Main message processing loop (transport-agnostic)

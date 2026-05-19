@@ -523,8 +523,12 @@ impl BsChannelScheduler {
         self.dltx_next_slot_queue.push(elem);
     }
 
-    pub fn dl_schedule_tmb(&mut self, _traffic: BitBuffer, _ts: &TdmaTime) {
-        unimplemented!("Broadcast scheduling not implemented yet");
+    pub fn dl_schedule_tmb(&mut self, traffic: BitBuffer, ts: &TdmaTime) {
+        tracing::warn!(
+            "BS scheduler: dropping unsupported TMB broadcast block at {} ({} bits)",
+            ts,
+            traffic.get_len()
+        );
     }
 
     // pub fn dl_schedule_tmd(&mut self, _traffic: BitBuffer, _ts: &TdmaTime) {
