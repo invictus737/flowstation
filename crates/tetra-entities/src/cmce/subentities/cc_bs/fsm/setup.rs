@@ -17,12 +17,32 @@ impl CcBsSubentity {
         let dest_gssi = dest_gssi as u32;
         let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
 
-        if !self.has_listener(dest_gssi) {
-            tracing::info!(
-                "CMCE: accepting U-SETUP from issi={} to gssi={} without listener cache entry",
+        let caller_affiliated = self
+            .subscriber_groups
+            .get(&calling_party.ssi)
+            .map(|groups| groups.contains(&dest_gssi))
+            .unwrap_or(false);
+        let has_local_listener = self.has_listener(dest_gssi);
+        let brew_routable = net_brew::is_brew_gssi_routable(&self.config, dest_gssi);
+
+        if !caller_affiliated {
+            tracing::warn!(
+                "CMCE: rejecting U-SETUP from issi={} to gssi={} because caller is not affiliated",
                 calling_party.ssi,
                 dest_gssi
             );
+            self.reject_setup_to_caller(queue, message, DisconnectCause::RequestedServiceNotAvailable);
+            return;
+        }
+
+        if !has_local_listener && !brew_routable {
+            tracing::warn!(
+                "CMCE: rejecting U-SETUP from issi={} to gssi={} because no local listener or Brew route exists",
+                calling_party.ssi,
+                dest_gssi
+            );
+            self.reject_setup_to_caller(queue, message, DisconnectCause::CalledPartyNotReachable);
+            return;
         }
 
         // Allocate circuit (DL+UL for group call)

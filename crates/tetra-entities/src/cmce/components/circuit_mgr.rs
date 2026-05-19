@@ -9,6 +9,7 @@ use tetra_saps::{
 
 const D_SETUP_REPEATS: i32 = 1;
 const LATE_ENTRY_INTERVAL_TIMESLOTS: i32 = multiframes!(5);
+const MAX_CIRCUIT_TX_QUEUE_BLOCKS: usize = 16;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CircuitErr {
@@ -315,6 +316,14 @@ impl CircuitMgr {
         if !self.is_active_dir(ts, Direction::Dl) {
             Err(CircuitErr::CircuitNotActive)
         } else {
+            if self.tx_data[ts as usize - 1].len() >= MAX_CIRCUIT_TX_QUEUE_BLOCKS {
+                self.tx_data[ts as usize - 1].pop_front();
+                tracing::warn!(
+                    "CMCE: dropping oldest stale DL circuit block on ts {} after queue reached {}",
+                    ts,
+                    MAX_CIRCUIT_TX_QUEUE_BLOCKS
+                );
+            }
             self.tx_data[ts as usize - 1].push_back(block);
             Ok(())
         }

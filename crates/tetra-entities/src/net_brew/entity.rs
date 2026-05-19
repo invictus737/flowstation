@@ -203,16 +203,12 @@ impl BrewEntity {
             match event {
                 BrewEvent::Connected { server_version } => {
                     tracing::debug!("BrewEntity: connected to TetraPack server (Brew v{})", server_version);
+                    let was_connected = self.connected;
                     self.connected = true;
+                    let _ = self.command_sender.send(BrewCommand::ResetSessionState);
                     self.resync_subscribers();
                     self.set_network_connected(true, server_version);
-                }
-                BrewEvent::VersionDetected { version } => {
-                    tracing::info!("BrewEntity: server Brew version detected from message length: v{}", version);
-                    let changed = self.set_network_connected(true, version);
-                    if changed {
-                        // Notify MM once when the effective Brew connection/version changes so it
-                        // can refresh locally registered MS state.
+                    if !was_connected {
                         queue.push_back(SapMsg {
                             sap: tetra_core::Sap::Control,
                             src: TetraEntity::Brew,
@@ -220,6 +216,10 @@ impl BrewEntity {
                             msg: SapMsgInner::BrewReconnected,
                         });
                     }
+                }
+                BrewEvent::VersionDetected { version } => {
+                    tracing::info!("BrewEntity: server Brew version detected from message length: v{}", version);
+                    self.set_network_connected(true, version);
                 }
                 BrewEvent::Disconnected(reason) => {
                     tracing::warn!("BrewEntity: Brew backhaul disconnected: {} — releasing all active calls", reason);
@@ -1424,10 +1424,11 @@ impl BrewEntity {
         // Only forward and acknowledge if destination ISSI is locally registered
         if !self.config.state_read().subscribers.is_registered(destination) {
             tracing::warn!(
-                "BrewEntity: SDS dest ISSI {} not registered, dropping (no report sent) uuid={}",
+                "BrewEntity: SDS dest ISSI {} not registered, reporting failure uuid={}",
                 destination,
                 uuid
             );
+            let _ = self.command_sender.send(BrewCommand::SendSdsReport { uuid, status: 1 });
             return;
         }
 

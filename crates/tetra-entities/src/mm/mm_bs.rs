@@ -36,6 +36,7 @@ use tetra_pdus::mm::pdus::u_mm_status::UMmStatus;
 use tetra_pdus::mm::pdus::u_tei_provide::UTeiProvide;
 
 const PERIODIC_REGISTRATION_REFRESH_GRACE_SECS: u32 = 60;
+const PERIODIC_REGISTRATION_REFRESH_GRACE_ENV: &str = "FLOWSTATION_PERIODIC_REFRESH_GRACE_SECS";
 const MAX_PERIODIC_REGISTRATION_REFRESH_ATTEMPTS: u8 = 3;
 const STARTUP_LOCATION_REFRESH_DELAY_SLOTS: u32 = 4 * 18 * 3;
 const MS_CACHE_ENV: &str = "FLOWSTATION_MS_CACHE";
@@ -112,6 +113,33 @@ impl MmBs {
         if self.cached_issis.remove(&issi) {
             self.persist_cached_issis();
         }
+    }
+
+    fn periodic_registration_refresh_grace_secs() -> u32 {
+        std::env::var(PERIODIC_REGISTRATION_REFRESH_GRACE_ENV)
+            .ok()
+            .and_then(|raw| raw.parse::<u32>().ok())
+            .filter(|secs| *secs > 0)
+            .unwrap_or(PERIODIC_REGISTRATION_REFRESH_GRACE_SECS)
+    }
+
+    fn deregister_client_state(&mut self, queue: &mut MessageQueue, issi: u32, reason: &str) -> Option<u32> {
+        let detached_client = self.client_mgr.remove_client(issi);
+        let Some(client) = detached_client else {
+            tracing::debug!("MM: deregister {} skipped for unknown ISSI {}", reason, issi);
+            return None;
+        };
+
+        self.config.state_write().subscribers.deregister(issi);
+        self.forget_registered_issi(issi);
+        if !client.groups.is_empty() {
+            let groups: Vec<u32> = client.groups.iter().copied().collect();
+            self.emit_subscriber_update(queue, issi, groups, BrewSubscriberAction::Deaffiliate);
+        }
+        self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
+        self.store_and_emit_energy_saving(queue, issi, None, None);
+        tracing::info!("MM: deregistered ISSI {} ({})", issi, reason);
+        Some(client.last_handle)
     }
 
     fn run_startup_location_refresh(&mut self, queue: &mut MessageQueue) {
@@ -273,19 +301,8 @@ impl MmBs {
         }
 
         let ssi = prim.received_address.ssi;
-        let detached_client = self.client_mgr.remove_client(ssi);
-        if let Some(client) = detached_client {
-            self.config.state_write().subscribers.deregister(ssi);
-            self.forget_registered_issi(ssi);
-            if !client.groups.is_empty() {
-                let groups: Vec<u32> = client.groups.iter().copied().collect();
-                self.emit_subscriber_update(queue, ssi, groups, BrewSubscriberAction::Deaffiliate);
-            }
-            self.emit_subscriber_update(queue, ssi, Vec::new(), BrewSubscriberAction::Deregister);
-            self.store_and_emit_energy_saving(queue, ssi, None, None);
-        } else {
+        if self.deregister_client_state(queue, ssi, "U-ITSI-DETACH").is_none() {
             tracing::warn!("Received UItsiDetach for unknown client with SSI: {}", ssi);
-            // return;
         };
     }
 
@@ -320,16 +337,7 @@ impl MmBs {
             // Send REJECT so terminal knows to try the other network, but first deregister from Brew.
             let issi = prim.received_address.ssi;
             tracing::info!("MM: ISSI {} migrating to another network — releasing from Brew", issi);
-            let detached = self.client_mgr.remove_client(issi);
-            if let Some(client) = detached {
-                self.config.state_write().subscribers.deregister(issi);
-                if !client.groups.is_empty() {
-                    let groups: Vec<u32> = client.groups.iter().copied().collect();
-                    self.emit_subscriber_update(queue, issi, groups, BrewSubscriberAction::Deaffiliate);
-                }
-                self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
-                self.store_and_emit_energy_saving(queue, issi, None, None);
-            }
+            self.deregister_client_state(queue, issi, "migration reject");
             Self::send_d_location_update_reject(queue, issi, prim.handle, pdu.location_update_type, pdu.address_extension);
             return;
         }
@@ -1331,11 +1339,23 @@ impl TetraEntityTrait for MmBs {
                     );
                 } else {
                     tracing::warn!(
-                        "MM: ISSI {} missed {} periodic registration refresh attempts — keeping registration and deferring next refresh",
+                        "MM: ISSI {} missed {} periodic registration refresh attempts — deregistering stale MS state",
                         issi,
                         attempts
                     );
-                    self.client_mgr.snooze_periodic_refresh(issi);
+                    let handle = self
+                        .deregister_client_state(queue, issi, "periodic registration timeout")
+                        .unwrap_or(0);
+                    if handle != 0 {
+                        Self::send_d_location_update_reject_cause(
+                            queue,
+                            issi,
+                            handle,
+                            LocationUpdateType::PeriodicLocationUpdating,
+                            None,
+                            RejectCause::ExpiryOfTimer,
+                        );
+                    }
                     continue;
                 }
             } else {
@@ -1360,14 +1380,15 @@ impl TetraEntityTrait for MmBs {
                 continue;
             }
             Self::send_d_location_update_command(queue, issi, handle, false);
-            let attempt = self.client_mgr.set_pending_command(issi, PERIODIC_REGISTRATION_REFRESH_GRACE_SECS);
+            let grace_secs = Self::periodic_registration_refresh_grace_secs();
+            let attempt = self.client_mgr.set_pending_command(issi, grace_secs);
             tracing::debug!(
                 "MM: ISSI {} periodic registration refresh attempt {}/{} queued (handle={}, grace={}s)",
                 issi,
                 attempt,
                 MAX_PERIODIC_REGISTRATION_REFRESH_ATTEMPTS,
                 handle,
-                PERIODIC_REGISTRATION_REFRESH_GRACE_SECS
+                grace_secs
             );
         }
     }
@@ -1428,19 +1449,7 @@ impl TetraEntityTrait for MmBs {
                             // This is cleaner than a reject: the terminal stays on the network
                             // but goes through a full re-registration cycle.
                             Self::send_d_location_update_command(queue, issi, 0, true);
-                            let groups: Vec<u32> = self
-                                .client_mgr
-                                .get_client_by_issi(issi)
-                                .map(|c| c.groups.iter().copied().collect())
-                                .unwrap_or_default();
-                            if !groups.is_empty() {
-                                self.emit_subscriber_update(queue, issi, groups, BrewSubscriberAction::Deaffiliate);
-                            }
-                            self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
-                            self.client_mgr.remove_client(issi);
-                            self.config.state_write().subscribers.deregister(issi);
-                            self.forget_registered_issi(issi);
-                            self.store_and_emit_energy_saving(queue, issi, None, None);
+                            self.deregister_client_state(queue, issi, "dashboard kick");
                         }
                     }
                     _ => {

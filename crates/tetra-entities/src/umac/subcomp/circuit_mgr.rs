@@ -3,6 +3,8 @@ use std::collections::VecDeque;
 use tetra_core::Direction;
 use tetra_saps::control::call_control::Circuit;
 
+const MAX_CIRCUIT_TX_QUEUE_BLOCKS: usize = 16;
+
 pub struct CircuitMgr {
     pub dl: [Option<Circuit>; 4],
     pub ul: [Option<Circuit>; 4],
@@ -101,6 +103,14 @@ impl CircuitMgr {
         if !self.is_active(Direction::Dl, ts) {
             tracing::warn!("CircuitMgr::put_block on inactive circuit {:?} {}", Direction::Dl, ts);
             return;
+        }
+        if self.tx_data[ts as usize - 1].len() >= MAX_CIRCUIT_TX_QUEUE_BLOCKS {
+            self.tx_data[ts as usize - 1].pop_front();
+            tracing::warn!(
+                "CircuitMgr::put_block dropping oldest stale DL circuit block on ts {} after queue reached {}",
+                ts,
+                MAX_CIRCUIT_TX_QUEUE_BLOCKS
+            );
         }
         self.tx_data[ts as usize - 1].push_back(block);
     }

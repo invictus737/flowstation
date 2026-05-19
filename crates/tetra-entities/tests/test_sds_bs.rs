@@ -2,9 +2,12 @@ mod common;
 
 use std::time::Duration;
 
-use tetra_config::bluestation::{CfgBrew, StackMode};
+use tetra_config::bluestation::{CfgBrew, SharedConfig, StackMode};
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, debug};
+use tetra_entities::MessageQueue;
+use tetra_entities::cmce::subentities::sds_bs::SdsBsSubentity;
+use tetra_entities::net_control::ControlCommand;
 use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
 use tetra_pdus::cmce::enums::pre_coded_status::PreCodedStatus;
 use tetra_pdus::cmce::pdus::u_sds_data::USdsData;
@@ -244,6 +247,38 @@ fn test_sds_group_delivery() {
             }
         }
     }
+}
+
+#[test]
+fn test_control_sds_group_delivery_uses_group_availability() {
+    debug::setup_logging_verbose();
+
+    let cfg = ComponentTest::get_default_test_config(StackMode::Bs);
+    let shared = SharedConfig::from_parts(cfg, None);
+    shared.state_write().subscribers.register(1000001);
+    shared.state_write().subscribers.affiliate(1000001, 100);
+
+    let mut sds = SdsBsSubentity::new(shared);
+    let mut queue = MessageQueue::new();
+    let success = sds.rx_sds_from_control(
+        &mut queue,
+        ControlCommand::SendSds {
+            handle: 7,
+            source_ssi: 9999,
+            dest_ssi: 100,
+            dest_is_group: true,
+            len_bits: 40,
+            payload: b"hello".to_vec(),
+        },
+    );
+
+    assert!(success);
+    let msg = queue.pop_front().expect("expected group SDS downlink");
+    let SapMsgInner::LcmcMleUnitdataReq(prim) = msg.msg else {
+        panic!("expected LcmcMleUnitdataReq");
+    };
+    assert_eq!(prim.main_address.ssi, 100);
+    assert_eq!(prim.main_address.ssi_type, SsiType::Gssi);
 }
 
 #[test]

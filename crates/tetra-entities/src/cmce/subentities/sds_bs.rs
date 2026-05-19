@@ -198,8 +198,19 @@ impl SdsBsSubentity {
             len_bits
         );
 
-        if !self.config.state_read().subscribers.is_registered(dest_ssi) {
-            tracing::warn!("SDS: dest ISSI {} from Control is not locally registered, dropping", dest_ssi);
+        let destination_available = if dest_is_group {
+            let state = self.config.state_read();
+            state.subscribers.has_group_members(dest_ssi) || net_brew::is_brew_gssi_routable(&self.config, dest_ssi)
+        } else {
+            self.config.state_read().subscribers.is_registered(dest_ssi)
+        };
+
+        if !destination_available {
+            tracing::warn!(
+                "SDS: dest {} {} from Control is not locally available, dropping",
+                dest_is_group.then_some("GSSI").unwrap_or("ISSI"),
+                dest_ssi
+            );
             return false;
         }
 

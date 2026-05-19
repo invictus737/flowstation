@@ -199,6 +199,44 @@ fn test_brew_reconnected_emits_location_update_command_for_registered_ms() {
 }
 
 #[test]
+fn test_periodic_registration_timeout_deregisters_stale_ms() {
+    debug::setup_logging_verbose();
+    unsafe {
+        std::env::set_var("FLOWSTATION_PERIODIC_REFRESH_GRACE_SECS", "1");
+    }
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut cfg = ComponentTest::get_default_test_config(StackMode::Bs);
+    cfg.cell.periodic_registration_secs = 1;
+    let mut test = ComponentTest::from_config(cfg, Some(dltime));
+    test.populate_entities(
+        vec![TetraEntity::Mm],
+        vec![TetraEntity::Mle, TetraEntity::Cmce, TetraEntity::Brew, TetraEntity::Umac],
+    );
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 17, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+
+    for _ in 0..3 {
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        test.run_stack(Some(1));
+        let _ = test.dump_sinks();
+    }
+
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    test.run_stack(Some(1));
+    let sink_msgs = test.dump_sinks();
+    let pdu_types = lmm_downlink_pdu_types(&sink_msgs);
+
+    assert!(pdu_types.contains(&MmPduTypeDl::DLocationUpdateReject));
+    assert!(!test.config.state_read().subscribers.is_registered(TEST_ISSI));
+    unsafe {
+        std::env::remove_var("FLOWSTATION_PERIODIC_REFRESH_GRACE_SECS");
+    }
+}
+
+#[test]
 fn test_location_update_accept_preserves_request_type_when_periodic_enabled() {
     debug::setup_logging_verbose();
 

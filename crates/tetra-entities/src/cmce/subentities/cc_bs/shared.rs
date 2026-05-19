@@ -244,6 +244,34 @@ impl CcBsSubentity {
         Self::build_d_release(d_setup_pdu.call_identifier, disconnect_cause)
     }
 
+    pub(super) fn reject_setup_to_caller(&self, queue: &mut MessageQueue, message: &SapMsg, disconnect_cause: DisconnectCause) {
+        let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
+
+        let sdu = Self::build_d_release(0, disconnect_cause);
+        queue.push_back(SapMsg {
+            sap: Sap::LcmcSap,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Mle,
+            msg: SapMsgInner::LcmcMleUnitdataReq(LcmcMleUnitdataReq {
+                sdu,
+                handle: prim.handle,
+                endpoint_id: prim.endpoint_id,
+                link_id: prim.link_id,
+                layer2service: Layer2Service::Unacknowledged,
+                pdu_prio: 0,
+                layer2_qos: 0,
+                stealing_permission: false,
+                stealing_repeats_flag: false,
+                chan_alloc: None,
+                main_address: prim.received_tetra_address,
+                tx_reporter: None,
+            }),
+        });
+    }
+
     pub(super) fn has_listener(&self, gssi: u32) -> bool {
         self.group_listeners.get(&gssi).copied().unwrap_or(0) > 0
     }

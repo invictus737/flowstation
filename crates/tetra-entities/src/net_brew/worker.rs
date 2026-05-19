@@ -99,6 +99,9 @@ pub enum BrewEvent {
 /// Commands the BrewEntity sends to the worker
 #[derive(Debug)]
 pub enum BrewCommand {
+    /// Clear worker-side session state after a transport reconnect.
+    ResetSessionState,
+
     /// Register a subscriber (ISSI)
     RegisterSubscriber { issi: u32 },
 
@@ -327,6 +330,10 @@ impl<T: NetworkTransport> BrewWorker<T> {
                     }
                 };
                 match cmd {
+                    BrewCommand::ResetSessionState => {
+                        tracing::info!("BrewWorker: clearing subscriber session state after reconnect");
+                        self.subscriber_groups.clear();
+                    }
                     BrewCommand::RegisterSubscriber { issi } => {
                         let already_registered = self.subscriber_groups.contains_key(&issi);
                         self.subscriber_groups.entry(issi).or_insert_with(HashSet::new);
