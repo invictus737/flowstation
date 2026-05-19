@@ -64,6 +64,14 @@ impl CcBsSubentity {
             return;
         };
         if ctx.current_talker_issi == talker_issi {
+            if ctx.talker_mnemonic.is_none() && !ctx.clir_invoked {
+                let talker_mnemonic = self.tpi_resolve_mnemonic(talker_issi);
+                if talker_mnemonic.is_some() {
+                    if let Some(ctx) = self.tpi_contexts.get_mut(&call_id) {
+                        ctx.talker_mnemonic = talker_mnemonic;
+                    }
+                }
+            }
             return;
         }
 
@@ -113,6 +121,19 @@ impl CcBsSubentity {
 
     pub(super) fn tpi_end_context(&mut self, call_id: u16) {
         self.tpi_contexts.remove(&call_id);
+    }
+
+    pub(super) fn tpi_note_network_mnemonic(&self, ssi: u32, mnemonic: Option<&str>) {
+        let Some(mnemonic) = mnemonic else {
+            return;
+        };
+        if let Some(record) = self.identity_resolver.observe_brew_mnemonic(ssi, mnemonic) {
+            tracing::debug!(
+                "SS-TPI identity cache: learned Brew mnemonic ssi={} mnemonic={:?}",
+                ssi,
+                record.mnemonic
+            );
+        }
     }
 
     pub(super) fn motorola_tpi_test_mode(&self, dest_gssi: u32) -> MotorolaTpiTestMode {

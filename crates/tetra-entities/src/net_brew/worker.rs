@@ -37,6 +37,7 @@ pub enum BrewEvent {
         dest_gssi: u32,
         priority: u8,
         service: u16,
+        mnemonic: Option<String>,
     },
 
     /// Group call ended
@@ -582,6 +583,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         dest_gssi: gt.destination,
                         priority: gt.priority,
                         service: gt.service,
+                        mnemonic: gt.mnemonic.as_ref().and_then(decode_mnemonic_name),
                     });
                 }
             }

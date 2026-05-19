@@ -22,6 +22,17 @@ The Motorola display experiments are disabled by default.
 
 Only network-originated group calls matching the configured GSSI are affected.
 
+## Identity source
+
+Brew v1 `GROUP_TX` mnemonic fields are decoded and cached as network identity
+records before CMCE builds SS-TPI for the RX call setup. This avoids depending
+on a Motorola codeplug agenda and avoids waiting for the asynchronous RadioID
+lookup on the first call from a new source SSI. RadioID remains a fallback for
+numeric IDs that arrive without a Brew mnemonic.
+
+The dashboard Brew protocol status is also refreshed when v1 is detected from
+message length after the WebSocket connection is already marked online.
+
 ## Test A: `tx-granted`
 
 Keep standard `D-SETUP` caller SSI and SS-TPI mnemonic. Immediately after call setup, send a RX-side `D-TX GRANTED` on the traffic channel with:
