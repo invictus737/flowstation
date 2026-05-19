@@ -337,7 +337,16 @@ impl CcBsSubentity {
         self.tpi_update_talker(call_id, source_issi);
         self.fsm_send_floor_granted_to_umac(queue, call_id, source_issi, dest_gssi, ts);
         self.send_group_d_setup_refresh(queue, call_id, source_issi, dest_gssi, usage, ts);
-        self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts);
+        if self.motorola_tpi_suppresses_tx_granted(dest_gssi) {
+            tracing::info!(
+                "CMCE Motorola SS-TPI test: suppressing D-TX GRANTED on speaker change call_id={} gssi={} source={}",
+                call_id,
+                dest_gssi,
+                source_issi
+            );
+        } else {
+            self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts);
+        }
 
         queue.push_back(SapMsg {
             sap: Sap::Control,

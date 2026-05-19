@@ -46,6 +46,7 @@ Goal: see whether Motorola updates the RX current-speaker display from `D-TX GRA
 ## Test B: `setup-mnemonic-only`
 
 For TG 91 only, suppress `D-SETUP.calling_party_address_ssi` and keep only SS-TPI mnemonic in the Facility IE.
+Suppress speaker-change `D-TX GRANTED` in this mode so no numeric transmitting-party SSI is sent immediately after the mnemonic-only setup refresh.
 
 Goal: see whether Motorola displays the mnemonic when the numeric caller field is absent.
 

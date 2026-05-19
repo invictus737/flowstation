@@ -178,6 +178,10 @@ impl CcBsSubentity {
         )
     }
 
+    pub(super) fn motorola_tpi_suppresses_tx_granted(&self, dest_gssi: u32) -> bool {
+        matches!(self.motorola_tpi_test_mode(dest_gssi), MotorolaTpiTestMode::SetupMnemonicOnly)
+    }
+
     fn tpi_resolve_mnemonic(&self, issi: u32) -> Option<String> {
         self.identity_resolver.lookup(issi).and_then(tpi_mnemonic_from_record)
     }
