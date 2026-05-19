@@ -1,0 +1,37 @@
+# Example systemd unit for a local FlowStation MOD base station.
+#
+# Install as:
+#   sudo cp contrib/systemd/tetra-flowstation.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now tetra-flowstation.service
+#
+# This example assumes:
+#   - the service user is "pi"
+#   - the binary or symlink is /home/pi/flowstation/bluestation-bs-rpi4
+#   - the config file is /home/pi/flowstation/config.toml
+#
+# Adjust paths and RF scheduling policy for your deployment.
+
+[Unit]
+Description=TETRA FlowStation
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/flowstation
+ExecStart=/usr/bin/chrt -f 99 /home/pi/flowstation/bluestation-bs-rpi4 /home/pi/flowstation/config.toml
+
+Restart=on-failure
+RestartSec=5s
+
+# Allow real-time scheduling for the RF timing loop.
+LimitRTPRIO=99
+LimitRTTIME=infinity
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=tetra-flowstation
+
+[Install]
+WantedBy=multi-user.target
