@@ -450,13 +450,12 @@ impl MmBs {
             self.client_mgr.reset_registration_timer(issi);
         }
         // Determine if we need to emit Register toward Brew.
-        // We do this when:
-        //   A) Terminal is genuinely new (never seen before).
-        //   B) Terminal is known but re-attaching via ItsiAttach — migrated from another network.
-        //   C) Terminal is known and had pending_command_sent=true — periodic refresh response.
-        //      This is non-destructive and does not require Brew re-registration.
+        // We only do this when the terminal is genuinely new. Some terminals
+        // emit ItsiAttach again when changing their selected GSSI; treating that
+        // as a full network return churns Brew/CMCE state and can make the MS
+        // briefly leave service even though RF remains healthy.
         let is_itsi_attach = pdu.location_update_type == LocationUpdateType::ItsiAttach;
-        let needs_brew_register = is_new || (!is_new && is_itsi_attach);
+        let needs_brew_register = is_new;
 
         if is_new {
             match self.client_mgr.try_register_client(issi, true) {
@@ -485,6 +484,11 @@ impl MmBs {
                 self.remember_registered_issi(issi);
             }
             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
+        } else if !is_new && is_itsi_attach {
+            tracing::info!(
+                "MM: ISSI {} re-attaching via ItsiAttach while already known; treating as soft group/location update",
+                issi
+            );
         } else if was_pending {
             tracing::info!("MM: ISSI {} completed periodic registration refresh", issi);
         }

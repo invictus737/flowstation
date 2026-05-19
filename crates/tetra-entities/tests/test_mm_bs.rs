@@ -1,14 +1,19 @@
 mod common;
 
-use tetra_config::bluestation::StackMode;
+use std::time::Duration;
+
+use tetra_config::bluestation::{CfgBrew, StackMode};
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, debug};
 use tetra_pdus::mm::enums::energy_saving_mode::EnergySavingMode;
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
+use tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocationDemand;
+use tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink;
 use tetra_pdus::mm::pdus::d_location_update_accept::DLocationUpdateAccept;
 use tetra_pdus::mm::pdus::d_mm_status::DMmStatus;
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
+use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
 use tetra_saps::lmm::LmmMleUnitdataInd;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
 
@@ -17,6 +22,10 @@ use crate::common::ComponentTest;
 const TEST_ISSI: u32 = 2260082;
 
 fn make_location_update_msg(issi: u32, handle: u32, location_update_type: LocationUpdateType) -> SapMsg {
+    make_location_update_msg_with_group(issi, handle, location_update_type, None)
+}
+
+fn make_location_update_msg_with_group(issi: u32, handle: u32, location_update_type: LocationUpdateType, gssi: Option<u32>) -> SapMsg {
     let pdu = ULocationUpdateDemand {
         location_update_type,
         request_to_append_la: false,
@@ -27,7 +36,16 @@ fn make_location_update_msg(issi: u32, handle: u32, location_update_type: Locati
         la_information: None,
         ssi: None,
         address_extension: None,
-        group_identity_location_demand: None,
+        group_identity_location_demand: gssi.map(|gssi| GroupIdentityLocationDemand {
+            group_identity_attach_detach_mode: 1,
+            group_identity_uplink: Some(vec![GroupIdentityUplink {
+                class_of_usage: Some(0),
+                group_identity_detachment_uplink: None,
+                gssi: Some(gssi),
+                address_extension: None,
+                vgssi: None,
+            }]),
+        }),
         group_report_response: None,
         authentication_uplink: None,
         extended_capabilities: None,
@@ -47,6 +65,21 @@ fn make_location_update_msg(issi: u32, handle: u32, location_update_type: Locati
             received_address: TetraAddress::issi(issi),
         }),
     }
+}
+
+fn subscriber_updates(msgs: &[SapMsg], dest: TetraEntity) -> Vec<MmSubscriberUpdate> {
+    msgs.iter()
+        .filter_map(|msg| {
+            if msg.dest != dest {
+                return None;
+            }
+            if let SapMsgInner::MmSubscriberUpdate(ref update) = msg.msg {
+                Some(update.clone())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn lmm_downlink_pdu_types(msgs: &[SapMsg]) -> Vec<MmPduTypeDl> {
@@ -146,6 +179,76 @@ fn test_itsi_attach_emits_only_location_update_accept_no_automatic_command() {
     let resp_pdu = first_location_update_accept(&sink_msgs);
     assert_eq!(resp_pdu.location_update_accept_type, LocationUpdateType::ItsiAttach);
     assert_eq!(resp_pdu.ssi, Some(TEST_ISSI as u64));
+}
+
+#[test]
+fn test_known_itsi_attach_with_new_group_does_not_reregister_subscriber() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut cfg = ComponentTest::get_default_test_config(StackMode::Bs);
+    cfg.brew = Some(CfgBrew {
+        host: "test-brew.local".to_string(),
+        port: 443,
+        tls: false,
+        username: None,
+        password: None,
+        reconnect_delay: Duration::from_secs(1),
+        jitter_initial_latency_frames: 0,
+        feature_sds_enabled: true,
+        feature_rssi_export: false,
+        whitelisted_ssis: None,
+    });
+    let mut test = ComponentTest::from_config(cfg, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Brew, TetraEntity::Cmce]);
+
+    test.submit_message(make_location_update_msg_with_group(
+        2260618,
+        17,
+        LocationUpdateType::ItsiAttach,
+        Some(226777),
+    ));
+    test.run_stack(Some(1));
+    let first_msgs = test.dump_sinks();
+    let first_brew_updates = subscriber_updates(&first_msgs, TetraEntity::Brew);
+    assert!(
+        first_brew_updates
+            .iter()
+            .any(|update| update.action == BrewSubscriberAction::Register)
+    );
+    assert!(
+        first_brew_updates
+            .iter()
+            .any(|update| { update.action == BrewSubscriberAction::Affiliate && update.groups == vec![226777] })
+    );
+
+    test.submit_message(make_location_update_msg_with_group(
+        2260618,
+        18,
+        LocationUpdateType::ItsiAttach,
+        Some(226112),
+    ));
+    test.run_stack(Some(1));
+    let second_msgs = test.dump_sinks();
+    let second_brew_updates = subscriber_updates(&second_msgs, TetraEntity::Brew);
+    assert!(
+        second_brew_updates
+            .iter()
+            .all(|update| update.action != BrewSubscriberAction::Register),
+        "known ItsiAttach should be a soft group update, not a Brew re-register"
+    );
+    assert!(
+        second_brew_updates
+            .iter()
+            .any(|update| { update.action == BrewSubscriberAction::Deaffiliate && update.groups == vec![226777] })
+    );
+    assert!(
+        second_brew_updates
+            .iter()
+            .any(|update| { update.action == BrewSubscriberAction::Affiliate && update.groups == vec![226112] })
+    );
+
+    assert_eq!(lmm_downlink_pdu_types(&second_msgs), vec![MmPduTypeDl::DLocationUpdateAccept]);
 }
 
 #[test]
