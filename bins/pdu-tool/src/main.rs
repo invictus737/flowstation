@@ -41,7 +41,7 @@ struct Args {
 
 fn main() {
     eprintln!("[+] TETRA PDU Decoding tool");
-    eprintln!("    Wouter Bokslag / Midnight Blue");
+    eprintln!("    Razvan Zeces / FlowStation.network");
     eprintln!(" *  This tool is a MESS and is for testing only  *");
     eprintln!(" *  There be bugs..                              *");
 

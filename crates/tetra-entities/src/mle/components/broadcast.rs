@@ -66,52 +66,91 @@ impl MleBroadcast {
         let tz = self.time_broadcast.as_deref().unwrap();
         let time_value = network_time::encode_tetra_network_time(tz).unwrap();
 
-        // Build neighbor cell list from config
-        let cfg = self.config.config();
-        let neighbour_cells: Vec<NeighbourCellInformationForCa> = cfg
-            .cell
-            .neighbor_cells_ca
-            .iter()
-            .map(|c| NeighbourCellInformationForCa {
-                cell_identifier_ca: c.cell_identifier_ca,
-                cell_reselection_types_supported: c.cell_reselection_types_supported,
-                neighbour_cell_synchronized: c.neighbor_cell_synchronized,
-                cell_load_ca: c.cell_load_ca,
-                main_carrier_number: c.main_carrier_number,
-                main_carrier_number_extension: c.main_carrier_number_extension,
-                mcc: c.mcc,
-                mnc: c.mnc,
-                location_area: c.location_area,
-                maximum_ms_transmit_power: c.maximum_ms_transmit_power,
-                minimum_rx_access_level: c.minimum_rx_access_level,
-                subscriber_class: c.subscriber_class,
-                bs_service_details: c.bs_service_details.as_ref().map(cfg_to_bs_service_details),
-                timeshare_cell_information_or_security_parameters: c.timeshare_cell_information_or_security_parameters,
-                tdma_frame_offset: c.tdma_frame_offset,
-            })
-            .collect();
-
-        let neighbour_count = neighbour_cells.len() as u8;
-
-        // Always emit Some(count), including Some(0).
-        // Bit-for-bit identical to BlueStation v0.0.x wire format, validated against
-        // Motorola MXP600 / MTM800E / MTM5400. Omitting the field (None) when count==0
-        // causes those terminals to drop the PDU as malformed.
-        let number_of_ca_neighbour_cells = Some(neighbour_count);
-
-        let pdu = DNwrkBroadcast {
+        // ============================================================
+        // PDU #1 — Time-only broadcast (no neighbours).
+        //
+        // This PDU is bit-for-bit identical to what BlueStation transmits:
+        //   75 bits, Some(time) + Some(0) neighbours, no neighbour info.
+        //
+        // Any MS that accepts BlueStation accepts this — guaranteed.
+        // We always send it first so radios get the time even if the
+        // neighbour PDU (below) is rejected for any reason (e.g.
+        // misconfigured cell_identifier_ca, MCC/MNC mismatch, etc.).
+        // ============================================================
+        let pdu_time_only = DNwrkBroadcast {
             cell_re_select_parameters: 0,
             cell_load_ca: 0,
             tetra_network_time: Some(time_value),
-            number_of_ca_neighbour_cells,
-            neighbour_cell_information_for_ca: neighbour_cells,
+            number_of_ca_neighbour_cells: Some(0),
+            neighbour_cell_information_for_ca: Vec::new(),
         };
+        self.transmit_pdu(queue, pdu_time_only, "time-only");
 
+        // ============================================================
+        // PDU #2 — Neighbour info broadcast (only if neighbours configured).
+        //
+        // Carries the full neighbour list for CA / handover. Larger PDU,
+        // can be rejected by some MS firmware if a neighbour is misconfigured,
+        // but at worst the time PDU above already arrived, so the time still
+        // shows on the radio.
+        // ============================================================
+        let cfg = self.config.config();
+        if !cfg.cell.neighbor_cells_ca.is_empty() {
+            let neighbour_cells: Vec<NeighbourCellInformationForCa> = cfg
+                .cell
+                .neighbor_cells_ca
+                .iter()
+                .map(|c| NeighbourCellInformationForCa {
+                    cell_identifier_ca: c.cell_identifier_ca,
+                    cell_reselection_types_supported: c.cell_reselection_types_supported,
+                    neighbour_cell_synchronized: c.neighbor_cell_synchronized,
+                    cell_load_ca: c.cell_load_ca,
+                    main_carrier_number: c.main_carrier_number,
+                    main_carrier_number_extension: c.main_carrier_number_extension,
+                    mcc: c.mcc,
+                    mnc: c.mnc,
+                    location_area: c.location_area,
+                    maximum_ms_transmit_power: c.maximum_ms_transmit_power,
+                    minimum_rx_access_level: c.minimum_rx_access_level,
+                    subscriber_class: c.subscriber_class,
+                    bs_service_details: c.bs_service_details.as_ref().map(cfg_to_bs_service_details),
+                    timeshare_cell_information_or_security_parameters: c
+                        .timeshare_cell_information_or_security_parameters,
+                    tdma_frame_offset: c.tdma_frame_offset,
+                })
+                .collect();
+
+            let neighbour_count = neighbour_cells.len() as u8;
+            let pdu_with_neighbours = DNwrkBroadcast {
+                cell_re_select_parameters: 0,
+                cell_load_ca: 0,
+                tetra_network_time: Some(time_value),
+                number_of_ca_neighbour_cells: Some(neighbour_count),
+                neighbour_cell_information_for_ca: neighbour_cells,
+            };
+            self.transmit_pdu(
+                queue,
+                pdu_with_neighbours,
+                &format!("with {} neighbours", neighbour_count),
+            );
+        }
+
+        tracing::info!(
+            "D-NWRK-BROADCAST sent (tz={}, time=0x{:012X}, dual={})",
+            tz,
+            time_value,
+            !cfg.cell.neighbor_cells_ca.is_empty()
+        );
+    }
+
+    /// Common transmission path — serializes the PDU, prepends the MLE
+    /// protocol discriminator, and pushes a TLA-UNITDATA req onto the queue.
+    fn transmit_pdu(&self, queue: &mut MessageQueue, pdu: DNwrkBroadcast, label: &str) {
         // Use autoexpand buffer — with up to 7 fully-populated neighbour cells the PDU
         // can exceed 900 bits, so a fixed-size buffer would silently corrupt the output.
         let mut pdu_buf = BitBuffer::new_autoexpand(256);
         if let Err(e) = pdu.to_bitbuf(&mut pdu_buf) {
-            tracing::warn!("Failed to serialize D-NWRK-BROADCAST: {:?}", e);
+            tracing::warn!("Failed to serialize D-NWRK-BROADCAST ({}): {:?}", label, e);
             return;
         }
         let pdu_len = pdu_buf.get_pos();
@@ -148,12 +187,7 @@ impl MleBroadcast {
             }),
         };
         queue.push_back(sapmsg);
-        tracing::info!(
-            "D-NWRK-BROADCAST sent (tz={}, time=0x{:012X}, neighbours={})",
-            tz,
-            time_value,
-            neighbour_count
-        );
+        tracing::debug!("D-NWRK-BROADCAST [{}] queued ({} bits)", label, pdu_len);
     }
 }
 
