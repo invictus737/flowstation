@@ -567,6 +567,23 @@ impl BsChannelScheduler {
             .unwrap_or(CircuitDlMediaSource::LocalLoopback)
     }
 
+    /// Update media-source policy for a reused simplex/group circuit without
+    /// reallocating it. A Brew speaker uses SwMI media; a local RF speaker uses
+    /// local loopback and is subject to UL inactivity supervision.
+    pub fn set_circuit_dl_media_source(&mut self, ts: u8, source: CircuitDlMediaSource) {
+        if !(1..=4).contains(&ts) {
+            tracing::warn!("set_circuit_dl_media_source: invalid ts {}", ts);
+            return;
+        }
+
+        if let Some(circuit) = self.circuits.dl[ts as usize - 1].as_mut() {
+            circuit.dl_media_source = source;
+        }
+        if let Some(circuit) = self.circuits.ul[ts as usize - 1].as_mut() {
+            circuit.dl_media_source = source;
+        }
+    }
+
     pub fn close_circuit(&mut self, dir: Direction, ts: u8) -> Option<Circuit> {
         // Clearing hangtime here is safe: if the circuit is gone, this timeslot is no longer in use.
         if (1..=4).contains(&ts) {

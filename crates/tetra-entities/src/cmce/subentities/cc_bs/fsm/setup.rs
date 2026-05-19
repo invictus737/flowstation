@@ -225,6 +225,7 @@ impl CcBsSubentity {
                     source_issi: calling_party.ssi,
                     dest_gssi,
                     ts: circuit.ts,
+                    uplink_expected: true,
                 }),
             };
             queue.push_back(msg);
@@ -863,6 +864,7 @@ impl CcBsSubentity {
                 source_issi: calling_party.ssi,
                 dest_gssi: calling_party.ssi,
                 ts,
+                uplink_expected: true,
             }),
         });
     }

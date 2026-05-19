@@ -86,6 +86,10 @@ pub enum CallControl {
         source_issi: u32,
         dest_gssi: u32,
         ts: u8,
+        /// True when the granted floor is expected to produce RF uplink voice
+        /// from a local MS. False for network/Brew speakers, where downlink
+        /// media is supplied by SwMI and UL inactivity must not expire the call.
+        uplink_expected: bool,
     },
     /// Floor released: speaker stopped transmitting (entering hangtime).
     FloorReleased { call_id: u16, ts: u8 },

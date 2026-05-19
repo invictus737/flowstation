@@ -177,6 +177,7 @@ impl CcBsSubentity {
                     source_issi: peer_addr.ssi,
                     dest_gssi: sender.ssi,
                     ts: peer_ts,
+                    uplink_expected: true,
                 }),
             });
 
@@ -195,6 +196,7 @@ impl CcBsSubentity {
                         source_issi: peer_addr.ssi,
                         dest_gssi: sender.ssi,
                         ts: peer_ts,
+                        uplink_expected: true,
                     }),
                 });
                 let _ = brew_uuid; // suppress unused warning

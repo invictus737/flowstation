@@ -50,15 +50,13 @@ impl CcBsSubentity {
                         if !cached.resend {
                             continue;
                         }
-                        // Update transmission_grant based on current call state:
-                        // During NoActiveSpeaker (nobody transmitting), use NotGranted;
-                        // during Transmitting, use GrantedToOtherUser.
-                        if let Some(active) = self.active_calls.get(&call_id) {
-                            cached.pdu.transmission_grant = if active.is_tx_active() {
-                                TransmissionGrant::GrantedToOtherUser
-                            } else {
-                                TransmissionGrant::NotGranted
-                            };
+                        // Late-entry D-SETUP keeps listeners attached to an established group call.
+                        // During hangtime there is no current speaker, but sending NotGranted makes
+                        // some terminals treat PTT as denied. Keep them in listener state and allow
+                        // floor requests via D-TX-CEASED/TRP=0.
+                        if self.active_calls.contains_key(&call_id) {
+                            cached.pdu.transmission_grant = TransmissionGrant::GrantedToOtherUser;
+                            cached.pdu.transmission_request_permission = false;
                         }
                         cached.pdu.facility = tpi_facility;
                         let dest_addr = cached.dest_addr;
@@ -360,6 +358,7 @@ impl CcBsSubentity {
                             source_issi: fake_issi,
                             dest_gssi: fake_issi,
                             ts,
+                            uplink_expected: true,
                         }),
                     });
                     return;

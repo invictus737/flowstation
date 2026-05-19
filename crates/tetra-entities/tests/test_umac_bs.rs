@@ -75,6 +75,45 @@ fn plain_issi_tma_req(issi: u32) -> SapMsg {
 }
 
 #[test]
+fn test_swmi_floor_does_not_trigger_ul_inactivity_timeout() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Cmce]);
+
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Cmce,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::CmceCallControl(CallControl::Open(Circuit {
+            direction: Direction::Both,
+            ts: 2,
+            peer_ts: None,
+            usage: 4,
+            circuit_mode: CircuitModeType::TchS,
+            speech_service: Some(0),
+            etee_encrypted: false,
+            dl_media_source: CircuitDlMediaSource::SwMI,
+        })),
+    });
+    test.run_stack(Some(4));
+    let _ = test.dump_sinks();
+
+    test.run_stack(Some(300));
+    let sink_msgs = test.dump_sinks();
+    assert!(
+        !sink_msgs.iter().any(|msg| {
+            matches!(
+                &msg.msg,
+                SapMsgInner::CmceCallControl(CallControl::UlInactivityTimeout { ts }) if *ts == 2
+            )
+        }),
+        "SwMI/Brew downlink floor must not be expired by local UL inactivity"
+    );
+}
+
+#[test]
 fn test_plain_issi_downlink_response_does_not_carry_random_access_flag() {
     debug::setup_logging_verbose();
     const TEST_ISSI: u32 = 2260082;

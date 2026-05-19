@@ -86,7 +86,15 @@ impl CcBsSubentity {
         queue.push_back(msg);
     }
 
-    fn fsm_send_floor_granted_to_umac(&self, queue: &mut MessageQueue, call_id: u16, source_issi: u32, dest_gssi: u32, ts: u8) {
+    fn fsm_send_floor_granted_to_umac(
+        &self,
+        queue: &mut MessageQueue,
+        call_id: u16,
+        source_issi: u32,
+        dest_gssi: u32,
+        ts: u8,
+        uplink_expected: bool,
+    ) {
         queue.push_back(SapMsg {
             sap: Sap::Control,
             src: TetraEntity::Cmce,
@@ -96,6 +104,7 @@ impl CcBsSubentity {
                 source_issi,
                 dest_gssi,
                 ts,
+                uplink_expected,
             }),
         });
     }
@@ -169,7 +178,7 @@ impl CcBsSubentity {
         // NoActiveSpeaker -> Transmitting transition with granted floor.
         // Notify UMAC first so it exits hangtime and moves any pending RA ACK
         // into the following FACCH/STCH block for the requesting MS.
-        self.fsm_send_floor_granted_to_umac(queue, call_id, requesting_party.ssi, dest_addr.ssi, ts);
+        self.fsm_send_floor_granted_to_umac(queue, call_id, requesting_party.ssi, dest_addr.ssi, ts, true);
         self.fsm_send_d_tx_granted_individual(
             queue,
             call_id,
@@ -197,6 +206,7 @@ impl CcBsSubentity {
                     source_issi: requesting_party.ssi,
                     dest_gssi: dest_addr.ssi,
                     ts,
+                    uplink_expected: true,
                 }),
             });
         }
@@ -243,7 +253,7 @@ impl CcBsSubentity {
 
         if let Some(requester) = queued_request {
             self.tpi_update_talker(call_id, requester.ssi);
-            self.fsm_send_floor_granted_to_umac(queue, call_id, requester.ssi, dest_addr.ssi, ts);
+            self.fsm_send_floor_granted_to_umac(queue, call_id, requester.ssi, dest_addr.ssi, ts, true);
             self.fsm_send_d_tx_granted_individual(queue, call_id, requester, ts, TransmissionGrant::Granted, Some(requester.ssi));
             self.send_d_tx_granted_facch(queue, call_id, requester.ssi, dest_addr.ssi, ts);
 
@@ -264,6 +274,7 @@ impl CcBsSubentity {
                         source_issi: requester.ssi,
                         dest_gssi: dest_addr.ssi,
                         ts,
+                        uplink_expected: true,
                     }),
                 });
             }
@@ -335,7 +346,7 @@ impl CcBsSubentity {
         let dest_gssi = call.dest_gssi;
 
         self.tpi_update_talker(call_id, source_issi);
-        self.fsm_send_floor_granted_to_umac(queue, call_id, source_issi, dest_gssi, ts);
+        self.fsm_send_floor_granted_to_umac(queue, call_id, source_issi, dest_gssi, ts, false);
         self.send_group_d_setup_refresh(queue, call_id, source_issi, dest_gssi, usage, ts);
         self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts);
 
