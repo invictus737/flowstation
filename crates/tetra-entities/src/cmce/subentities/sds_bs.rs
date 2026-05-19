@@ -19,6 +19,7 @@ use crate::MessageQueue;
 use crate::net_brew;
 use crate::net_control::ControlCommand;
 use crate::net_telemetry::{TelemetryEvent, TelemetrySink};
+use crate::service_control::{ServiceAction, schedule_service_action};
 
 /// Clause 13 Short Data Service CMCE sub-entity
 /// Actions that sds_bs cannot execute itself (need access to CcBsSubentity or system),
@@ -501,16 +502,10 @@ impl SdsBsSubentity {
 
         match entry.action.as_str() {
             "restart" => {
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = std::process::Command::new("systemctl").args(["restart", "tetra"]).status();
-                });
+                schedule_service_action(ServiceAction::Restart, std::time::Duration::from_millis(500));
             }
             "shutdown" => {
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = std::process::Command::new("systemctl").args(["stop", "tetra"]).status();
-                });
+                schedule_service_action(ServiceAction::Stop, std::time::Duration::from_millis(500));
             }
             "kick_all" => {
                 self.pending_actions.push(SdsPendingAction::KickAll);

@@ -14,6 +14,7 @@ use crate::net_control::commands::{ControlCommand, RfGainDirection};
 use crate::net_dashboard::html::DASHBOARD_HTML;
 use crate::net_dashboard::state::{CallEntry, DashboardState, DashboardStateInner, MsEntry, RfLoopbackFrame};
 use crate::net_telemetry::TelemetryEvent;
+use crate::service_control::{ServiceAction, schedule_service_action};
 
 type CmdSender = crossbeam_channel::Sender<ControlCommand>;
 
@@ -65,7 +66,7 @@ type SharedUpdateState = Arc<Mutex<UpdateState>>;
 ///   1. Backup config.toml → config.toml.bak
 ///   2. git -C <src_dir> pull
 ///   3. cargo build --release
-///   4. systemctl restart tetra   (after short delay, gives 200 OK time to reach browser)
+///   4. Restart the current systemd service (after short delay, gives 200 OK time to reach browser)
 ///
 /// src_dir is derived from the binary path: the directory containing the running binary's
 /// parent (i.e. target/release is sibling of src root), so we go up two levels.
@@ -189,10 +190,7 @@ fn run_update(update: SharedUpdateState, config_path: String) {
     log!(update, "--- Build successful. Restarting service in 2s... ---");
     update.lock().unwrap().finish(true);
 
-    std::thread::spawn(|| {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let _ = std::process::Command::new("systemctl").args(["restart", "tetra"]).status();
-    });
+    schedule_service_action(ServiceAction::Restart, std::time::Duration::from_secs(2));
 }
 
 pub struct DashboardServer {

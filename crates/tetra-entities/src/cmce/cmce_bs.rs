@@ -1,5 +1,6 @@
 use crate::net_control::{ControlCommand, ControlEndpoint, ControlResponse};
 use crate::net_telemetry::TelemetrySink;
+use crate::service_control::{ServiceAction, schedule_service_action};
 use crate::{MessageQueue, TetraEntityTrait};
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
@@ -81,21 +82,11 @@ impl CmceBs {
             }
             ControlCommand::RestartService => {
                 tracing::info!("CMCE: RestartService requested");
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = std::process::Command::new("systemctl")
-                        .args(["restart", "tetra"])
-                        .status();
-                });
+                schedule_service_action(ServiceAction::Restart, std::time::Duration::from_millis(500));
             }
             ControlCommand::ShutdownService => {
                 tracing::info!("CMCE: ShutdownService requested");
-                std::thread::spawn(|| {
-                    std::thread::sleep(std::time::Duration::from_millis(500));
-                    let _ = std::process::Command::new("systemctl")
-                        .args(["stop", "tetra"])
-                        .status();
-                });
+                schedule_service_action(ServiceAction::Stop, std::time::Duration::from_millis(500));
             }
             _ => {
                 tracing::warn!("CMCE: ignoring unsupported control command {:?}", cmd);

@@ -30,10 +30,10 @@ pub enum ControlCommand {
     /// Forcibly deregister a terminal from the BS
     KickMs { issi: u32 },
 
-    /// Restart the FlowStation service (systemctl restart tetra)
+    /// Restart the FlowStation service hosting the current process.
     RestartService,
 
-    /// Stop the FlowStation service (systemctl stop tetra)
+    /// Stop the FlowStation service hosting the current process.
     ShutdownService,
 
     /// Runtime RF gain change applied directly to the SDR driver.
