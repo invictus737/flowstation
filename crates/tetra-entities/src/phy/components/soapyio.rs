@@ -166,7 +166,15 @@ impl SoapyIo {
         }
 
         sx1255_autocal.startup(&dev, rx_ch, tx_ch);
-        sx1255_autocal.startup_loopback_calibration(&dev, rx_ch, tx_ch, rx_fs, &sdr_settings.rx_args, &sdr_settings.tx_args, telemetry.as_ref());
+        sx1255_autocal.startup_loopback_calibration(
+            &dev,
+            rx_ch,
+            tx_ch,
+            rx_fs,
+            &sdr_settings.rx_args,
+            &sdr_settings.tx_args,
+            telemetry.as_ref(),
+        );
 
         let mut rx_args = soapysdr::Args::new();
         for (key, value) in sdr_settings.rx_args {

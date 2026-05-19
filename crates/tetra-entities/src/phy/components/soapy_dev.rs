@@ -558,7 +558,10 @@ impl TxSignalMonitor {
     }
 }
 
-fn constellation_timing_rotation_gain(samples: &[ComplexSample], samples_per_symbol: RealSample) -> Option<(RealSample, RealSample, RealSample)> {
+fn constellation_timing_rotation_gain(
+    samples: &[ComplexSample],
+    samples_per_symbol: RealSample,
+) -> Option<(RealSample, RealSample, RealSample)> {
     const STEPS: usize = 64;
     let mut best: Option<(RealSample, RealSample, RealSample, RealSample)> = None;
 

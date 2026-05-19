@@ -329,7 +329,10 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
         }),
         neighbor_cells_ca: ci.neighbor_cells_ca,
         hangtime_secs: ci.hangtime_secs.unwrap_or(5).clamp(0, 300),
-        call_timeout_secs: { let v = ci.call_timeout_secs.unwrap_or(120); if v == 0 { 0 } else { v.clamp(30, 86400) } },
+        call_timeout_secs: {
+            let v = ci.call_timeout_secs.unwrap_or(120);
+            if v == 0 { 0 } else { v.clamp(30, 86400) }
+        },
         ul_inactivity_secs: ci.ul_inactivity_secs.unwrap_or(3).clamp(1, 30),
         periodic_registration_secs: {
             let v = ci.periodic_registration_secs.unwrap_or(3600);
@@ -337,10 +340,14 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
         },
         sds_command_control: ci.sds_command_control.map(|dto| CfgSdsCommandControl {
             authorized_issis: dto.authorized_issis,
-            commands: dto.commands.into_iter().map(|e| CfgSdsCommandEntry {
-                status_code: e.status_code,
-                action: e.action,
-            }).collect(),
+            commands: dto
+                .commands
+                .into_iter()
+                .map(|e| CfgSdsCommandEntry {
+                    status_code: e.status_code,
+                    action: e.action,
+                })
+                .collect(),
         }),
     }
 }

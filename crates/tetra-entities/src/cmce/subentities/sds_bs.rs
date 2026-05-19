@@ -73,7 +73,8 @@ impl SdsBsSubentity {
         tracing::trace!("SDS route_rf_deliver");
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
         let calling_party = prim.received_tetra_address;
 
@@ -121,11 +122,17 @@ impl SdsBsSubentity {
         if is_local_issi {
             tracing::info!("SDS: local delivery: {} -> {}", source_ssi, dest_ssi);
             self.send_d_sds_data(queue, source_ssi, dest_ssi, SsiType::Issi, pdu.user_defined_data);
-            self.emit(TelemetryEvent::SdsActivity { source_issi: source_ssi, dest_issi: dest_ssi });
+            self.emit(TelemetryEvent::SdsActivity {
+                source_issi: source_ssi,
+                dest_issi: dest_ssi,
+            });
         } else if is_local_group {
             tracing::info!("SDS: group delivery: {} -> GSSI {}", source_ssi, dest_ssi);
             self.send_d_sds_data(queue, source_ssi, dest_ssi, SsiType::Gssi, pdu.user_defined_data);
-            self.emit(TelemetryEvent::SdsActivity { source_issi: source_ssi, dest_issi: dest_ssi });
+            self.emit(TelemetryEvent::SdsActivity {
+                source_issi: source_ssi,
+                dest_issi: dest_ssi,
+            });
         } else if net_brew::feature_sds_enabled(&self.config) {
             tracing::info!("SDS: forwarding to Brew: {} -> {}", source_ssi, dest_ssi);
             queue.push_back(SapMsg {
@@ -205,7 +212,12 @@ impl SdsBsSubentity {
         static SDS_MR: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
         let mr = {
             let v = SDS_MR.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if v == 0 { SDS_MR.store(1, std::sync::atomic::Ordering::Relaxed); 1 } else { v }
+            if v == 0 {
+                SDS_MR.store(1, std::sync::atomic::Ordering::Relaxed);
+                1
+            } else {
+                v
+            }
         };
         let wrapped_payload: Vec<u8> = {
             let mut v = vec![0x82u8, 0x04u8, mr, 0x01u8];
@@ -230,7 +242,8 @@ impl SdsBsSubentity {
         tracing::trace!("SDS route_status_deliver");
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
         let calling_party = prim.received_tetra_address;
 
@@ -398,7 +411,7 @@ impl SdsBsSubentity {
         let layer2service = match dest_ssi_type {
             SsiType::Issi => Layer2Service::Acknowledged,
             SsiType::Gssi => Layer2Service::Unacknowledged,
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
         };
         let msg = SapMsg {
             sap: Sap::LcmcSap,
@@ -474,7 +487,8 @@ impl SdsBsSubentity {
         let Some(ref ctrl) = cfg.cell.sds_command_control else {
             tracing::debug!(
                 "SDS-CMD: U-STATUS to 9999 from {} (status={}) but sds_command_control not configured, ignoring",
-                source_ssi, status_code
+                source_ssi,
+                status_code
             );
             return;
         };
@@ -482,7 +496,8 @@ impl SdsBsSubentity {
         if !ctrl.authorized_issis.contains(&source_ssi) {
             tracing::warn!(
                 "SDS-CMD: U-STATUS to 9999 from ISSI {} (status={}) — ISSI not in authorized_issis, ignoring",
-                source_ssi, status_code
+                source_ssi,
+                status_code
             );
             return;
         }
@@ -490,14 +505,17 @@ impl SdsBsSubentity {
         let Some(entry) = ctrl.commands.iter().find(|e| e.status_code == status_code) else {
             tracing::debug!(
                 "SDS-CMD: U-STATUS to 9999 from ISSI {} status={} — no matching command, ignoring",
-                source_ssi, status_code
+                source_ssi,
+                status_code
             );
             return;
         };
 
         tracing::info!(
             "SDS-CMD: ISSI {} triggered action='{}' via status={}",
-            source_ssi, entry.action, status_code
+            source_ssi,
+            entry.action,
+            status_code
         );
 
         match entry.action.as_str() {

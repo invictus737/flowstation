@@ -48,13 +48,9 @@ pub(super) fn call_timeout_to_timeslots(timeout: CallTimeout) -> Option<i32> {
 #[derive(Clone)]
 pub(super) enum CallOrigin {
     /// Local MS-initiated call
-    Local {
-        caller_addr: TetraAddress,
-    },
+    Local { caller_addr: TetraAddress },
     /// Network-initiated call from TetraPack/Brew
-    Network {
-        brew_uuid: uuid::Uuid,
-    },
+    Network { brew_uuid: uuid::Uuid },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -270,9 +266,7 @@ impl IndividualCall {
     pub(super) fn is_alerted(&self) -> bool {
         matches!(
             self.state,
-            IndividualCallState::IncomingAlerting
-                | IndividualCallState::IncomingSetupWaitNetworkAck
-                | IndividualCallState::Active
+            IndividualCallState::IncomingAlerting | IndividualCallState::IncomingSetupWaitNetworkAck | IndividualCallState::Active
         )
     }
 

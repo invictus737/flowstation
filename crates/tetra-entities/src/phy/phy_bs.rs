@@ -182,7 +182,7 @@ impl<D: RxTxDev> PhyBs<D> {
                 Self::send_rxblock_to_lmac(queue, train_seq, BurstType::CUB, PhyBlockType::SSN1, PhyBlockNum::Block1, blk, rssi);
             }
 
-            _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+            _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
         }
     }
 
@@ -193,7 +193,10 @@ impl<D: RxTxDev> PhyBs<D> {
 
         self.tick += 1;
 
-        let SapMsgInner::TpUnitdataReq(prim) = message.msg else { tracing::error!("BUG: unexpected message or state -- routing error"); return; };
+        let SapMsgInner::TpUnitdataReq(prim) = message.msg else {
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         // Generate block (from file or from LMAC data)
         let mut dl_burst = [0u8; TIMESLOT_TYPE4_BITS];
@@ -246,7 +249,7 @@ impl<D: RxTxDev> PhyBs<D> {
 
                     slotter::build_ndb(prim.train_type, &blk1, &bbk, &blk2)
                 }
-                _ => unreachable!("BUG: unhandled match variant -- should never be reached")
+                _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
             };
         }
 
@@ -340,7 +343,8 @@ impl<D: RxTxDev + Send + 'static> TetraEntityTrait for PhyBs<D> {
                 self.rx_tpc_prim(queue, message);
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }

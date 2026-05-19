@@ -27,7 +27,9 @@ impl CcBsSubentity {
     /// If an echo session owns this timeslot, loopback the frame as DL.
     pub fn handle_echo_ul_frame(&mut self, queue: &mut MessageQueue, ts: u8, data: Vec<u8>) {
         let Some(session) = self.echo_session.as_mut() else { return };
-        if session.ts != ts { return }
+        if session.ts != ts {
+            return;
+        }
         if let Some(echo_data) = session.push_ul_frame(data) {
             queue.push_back(crate::cmce::subentities::cc_bs::echo::EchoSession::make_dl_msg(ts, echo_data));
         }
@@ -153,13 +155,7 @@ impl CcBsSubentity {
     /// Build a SAP message with explicit LLC link context (handle/link_id/endpoint_id).
     /// Used for individually-addressed responses that must be routed back through
     /// the established LLC link of a specific MS.
-    pub(super) fn build_sapmsg_direct(
-        sdu: BitBuffer,
-        address: TetraAddress,
-        handle: u32,
-        link_id: u32,
-        endpoint_id: u32,
-    ) -> SapMsg {
+    pub(super) fn build_sapmsg_direct(sdu: BitBuffer, address: TetraAddress, handle: u32, link_id: u32, endpoint_id: u32) -> SapMsg {
         SapMsg {
             sap: Sap::LcmcSap,
             src: TetraEntity::Cmce,
@@ -332,16 +328,11 @@ impl CcBsSubentity {
                 let calls_to_release: Vec<u16> = self
                     .individual_calls
                     .iter()
-                    .filter(|(_, call)| {
-                        call.calling_addr.ssi == issi || call.called_addr.ssi == issi
-                    })
+                    .filter(|(_, call)| call.calling_addr.ssi == issi || call.called_addr.ssi == issi)
                     .map(|(&id, _)| id)
                     .collect();
                 for call_id in calls_to_release {
-                    tracing::info!(
-                        "CMCE: releasing individual call_id={} because ISSI {} deregistered",
-                        call_id, issi
-                    );
+                    tracing::info!("CMCE: releasing individual call_id={} because ISSI {} deregistered", call_id, issi);
                     self.release_individual_call(queue, call_id, DisconnectCause::UserRequestedDisconnection);
                 }
 
@@ -411,8 +402,9 @@ impl CcBsSubentity {
         tracing::trace!("send_d_call_proceeding");
 
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let pdu_response = DCallProceeding {
             call_identifier: call_id,
@@ -632,9 +624,7 @@ impl CcBsSubentity {
 
     #[inline]
     pub(super) fn has_external_called_party(pdu: &USetup, network_call: &NetworkCircuitCall) -> bool {
-        !network_call.number.is_empty()
-            || pdu.external_subscriber_number.is_some()
-            || pdu.called_party_short_number_address.is_some()
+        !network_call.number.is_empty() || pdu.external_subscriber_number.is_some() || pdu.called_party_short_number_address.is_some()
     }
 
     /// Send D-DISCONNECT to the other party of an individual call.
@@ -759,9 +749,7 @@ impl CcBsSubentity {
         };
         // Both simplex and duplex are supported for P2P calls.
         // Group/broadcast remain simplex only.
-        if pdu.basic_service_information.communication_type != CommunicationType::P2p
-            && pdu.simplex_duplex_selection
-        {
+        if pdu.basic_service_information.communication_type != CommunicationType::P2p && pdu.simplex_duplex_selection {
             unimplemented_log!(
                 "Duplex only supported for P2P calls (comm_type={})",
                 pdu.basic_service_information.communication_type
@@ -771,13 +759,12 @@ impl CcBsSubentity {
         if pdu.clir_control != 0 {
             unimplemented_log!("clir_control not supported: {}", pdu.clir_control);
         };
-        if pdu.called_party_ssi.is_none()
-            && pdu.called_party_short_number_address.is_none()
-            && pdu.external_subscriber_number.is_none()
-        {
+        if pdu.called_party_ssi.is_none() && pdu.called_party_short_number_address.is_none() && pdu.external_subscriber_number.is_none() {
             unimplemented_log!("U-SETUP called party not set (no SSI, short number or external number)");
         };
-        if pdu.called_party_extension.is_some() && pdu.called_party_type_identifier != tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi {
+        if pdu.called_party_extension.is_some()
+            && pdu.called_party_type_identifier != tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi
+        {
             unimplemented_log!(
                 "U-SETUP called_party_extension present with unexpected called_party_type_identifier={}",
                 pdu.called_party_type_identifier
@@ -796,27 +783,26 @@ impl CcBsSubentity {
         supported
     }
 
-
     /// Map call_timeout_secs from config to the nearest ETSI CallTimeout enum value.
     /// ETSI EN 300 392-2 Table 14.50: BS sets D-SETUP call_time_out to indicate max call duration.
     pub(super) fn config_call_timeout(&self) -> CallTimeout {
         let secs = self.config.config().cell.call_timeout_secs;
         match secs {
-            0           => CallTimeout::Infinite,  // 0 = no limit
-            1..=37      => CallTimeout::T30s,
-            38..=52     => CallTimeout::T45s,
-            53..=90     => CallTimeout::T60s,
-            91..=150    => CallTimeout::T2m,
-            151..=210   => CallTimeout::T3m,
-            211..=270   => CallTimeout::T4m,
-            271..=390   => CallTimeout::T5m,
-            391..=540   => CallTimeout::T6m,
-            541..=720   => CallTimeout::T8m,
-            721..=900   => CallTimeout::T10m,
-            901..=1080  => CallTimeout::T12m,
+            0 => CallTimeout::Infinite, // 0 = no limit
+            1..=37 => CallTimeout::T30s,
+            38..=52 => CallTimeout::T45s,
+            53..=90 => CallTimeout::T60s,
+            91..=150 => CallTimeout::T2m,
+            151..=210 => CallTimeout::T3m,
+            211..=270 => CallTimeout::T4m,
+            271..=390 => CallTimeout::T5m,
+            391..=540 => CallTimeout::T6m,
+            541..=720 => CallTimeout::T8m,
+            721..=900 => CallTimeout::T10m,
+            901..=1080 => CallTimeout::T12m,
             1081..=1350 => CallTimeout::T15m,
             1351..=1800 => CallTimeout::T20m,
-            _           => CallTimeout::T30m,
+            _ => CallTimeout::T30m,
         }
     }
 
@@ -922,7 +908,9 @@ impl CcBsSubentity {
                     // Use origin uuid — call.brew_uuid may be None if cleared on hangtime entry.
                     tracing::info!(
                         "release_group_call: notifying Brew of expired network call_id={} brew_uuid={} cause={:?}",
-                        call_id, brew_uuid, disconnect_cause
+                        call_id,
+                        brew_uuid,
+                        disconnect_cause
                     );
                     queue.push_back(SapMsg {
                         sap: Sap::Control,
@@ -993,14 +981,12 @@ impl CcBsSubentity {
                     Self::build_d_release(call_id, disconnect_cause)
                 };
                 if send_calling_leg {
-                    let prim_calling =
-                        Self::build_sapmsg(sdu_calling, None, call.calling_addr, Layer2Service::Unacknowledged, None);
+                    let prim_calling = Self::build_sapmsg(sdu_calling, None, call.calling_addr, Layer2Service::Unacknowledged, None);
                     queue.push_back(prim_calling);
                 }
 
                 if send_called_leg {
-                    let prim_called =
-                        Self::build_sapmsg(sdu_called, None, call.called_addr, Layer2Service::Unacknowledged, None);
+                    let prim_called = Self::build_sapmsg(sdu_called, None, call.called_addr, Layer2Service::Unacknowledged, None);
                     queue.push_back(prim_called);
                 }
             }
@@ -1077,7 +1063,9 @@ impl CcBsSubentity {
             return false;
         }
         // Release all active individual calls involving this MS
-        let individual_ids: Vec<u16> = self.individual_calls.iter()
+        let individual_ids: Vec<u16> = self
+            .individual_calls
+            .iter()
             .filter(|(_, c)| c.calling_addr.ssi == issi || c.called_addr.ssi == issi)
             .map(|(&id, _)| id)
             .collect();
@@ -1086,12 +1074,14 @@ impl CcBsSubentity {
         }
         // Clean up CMCE state
         if let Some(groups) = self.subscriber_groups.remove(&issi) {
-            for g in &groups { self.dec_group_listener(*g); }
+            for g in &groups {
+                self.dec_group_listener(*g);
+            }
         }
         // Tell MM to deregister the MS — this also notifies Brew
-        use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
-        use tetra_saps::SapMsgInner;
         use tetra_core::Sap;
+        use tetra_saps::SapMsgInner;
+        use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
         queue.push_back(tetra_saps::SapMsg {
             sap: Sap::Control,
             src: tetra_core::tetra_entities::TetraEntity::Cmce,
@@ -1108,20 +1098,24 @@ impl CcBsSubentity {
 
     /// Snapshot of active group calls for the dashboard.
     pub fn active_calls_snapshot(&self) -> Vec<(u16, u32, u32, bool)> {
-        self.active_calls.iter().map(|(&id, c)| {
-            let caller = match &c.origin {
-                crate::cmce::subentities::cc_bs::call::CallOrigin::Local { caller_addr } => caller_addr.ssi,
-                _ => 0,
-            };
-            (id, c.dest_gssi, caller, c.tx_active)
-        }).collect()
+        self.active_calls
+            .iter()
+            .map(|(&id, c)| {
+                let caller = match &c.origin {
+                    crate::cmce::subentities::cc_bs::call::CallOrigin::Local { caller_addr } => caller_addr.ssi,
+                    _ => 0,
+                };
+                (id, c.dest_gssi, caller, c.tx_active)
+            })
+            .collect()
     }
 
     /// Snapshot of active individual calls for the dashboard.
     pub fn individual_calls_snapshot(&self) -> Vec<(u16, u32, u32, bool)> {
-        self.individual_calls.iter().map(|(&id, c)| {
-            (id, c.calling_addr.ssi, c.called_addr.ssi, !c.simplex_duplex)
-        }).collect()
+        self.individual_calls
+            .iter()
+            .map(|(&id, c)| (id, c.calling_addr.ssi, c.called_addr.ssi, !c.simplex_duplex))
+            .collect()
     }
 }
 

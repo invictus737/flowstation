@@ -114,8 +114,7 @@ impl MleBroadcast {
                     minimum_rx_access_level: c.minimum_rx_access_level,
                     subscriber_class: c.subscriber_class,
                     bs_service_details: c.bs_service_details.as_ref().map(cfg_to_bs_service_details),
-                    timeshare_cell_information_or_security_parameters: c
-                        .timeshare_cell_information_or_security_parameters,
+                    timeshare_cell_information_or_security_parameters: c.timeshare_cell_information_or_security_parameters,
                     tdma_frame_offset: c.tdma_frame_offset,
                 })
                 .collect();
@@ -128,11 +127,7 @@ impl MleBroadcast {
                 number_of_ca_neighbour_cells: Some(neighbour_count),
                 neighbour_cell_information_for_ca: neighbour_cells,
             };
-            self.transmit_pdu(
-                queue,
-                pdu_with_neighbours,
-                &format!("with {} neighbours", neighbour_count),
-            );
+            self.transmit_pdu(queue, pdu_with_neighbours, &format!("with {} neighbours", neighbour_count));
         }
 
         tracing::info!(

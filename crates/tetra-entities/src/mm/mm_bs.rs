@@ -319,7 +319,8 @@ impl MmBs {
                 // Heuristic: if the terminal was registered less than 60 seconds ago, treat
                 // RoamingLocationUpdating as a soft re-attach (no cleanup). If it's been longer,
                 // it's likely a genuine reboot or RF recovery.
-                let recently_registered = self.client_mgr
+                let recently_registered = self
+                    .client_mgr
                     .get_client_by_issi(issi)
                     .map(|c| c.last_registration_time.elapsed().as_secs() < 60)
                     .unwrap_or(false);

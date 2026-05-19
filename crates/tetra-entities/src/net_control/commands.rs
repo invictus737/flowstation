@@ -57,9 +57,18 @@ pub enum ControlCommand {
 /// Response sent back after processing a [`ControlCommand`].
 #[derive(Debug, Clone, Encode, Decode, Serialize, Deserialize)]
 pub enum ControlResponse {
-    CommandAResponse { handle: u32, result: u32 },
-    SendSdsResponse { handle: u32, success: bool },
-    KickMsResponse { issi: u32, success: bool },
+    CommandAResponse {
+        handle: u32,
+        result: u32,
+    },
+    SendSdsResponse {
+        handle: u32,
+        success: bool,
+    },
+    KickMsResponse {
+        issi: u32,
+        success: bool,
+    },
     RfGainResponse {
         direction: RfGainDirection,
         name: String,

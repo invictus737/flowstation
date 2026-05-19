@@ -62,11 +62,13 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
 
     // Extract sds_command_control from cell_info before typed deserialisation
     // (same reason as neighbor_cells_ca: serde #[flatten] would capture it as opaque Value)
-    let sds_command_control_raw = raw
-        .get_mut("cell_info")
-        .and_then(|ci| {
-            if let Value::Table(t) = ci { t.remove("sds_command_control") } else { None }
-        });
+    let sds_command_control_raw = raw.get_mut("cell_info").and_then(|ci| {
+        if let Value::Table(t) = ci {
+            t.remove("sds_command_control")
+        } else {
+            None
+        }
+    });
 
     // Now deserialise the (mutated) Value into the typed root — neighbor_cells_ca
     // has been removed so it will not appear in the flatten HashMap.
@@ -149,19 +151,27 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     let mut cell_cfg = cell_dto_to_cfg(root.cell_info);
     cell_cfg.neighbor_cells_ca = neighbor_cells_ca;
     if let Some(v) = sds_command_control_raw {
-        let dto = v.try_into::<SdsCommandControlDto>()
+        let dto = v
+            .try_into::<SdsCommandControlDto>()
             .map_err(|e| format!("cell_info.sds_command_control: {}", e))?;
         if !dto.extra.is_empty() {
-            return Err(format!("Unrecognized fields in cell_info.sds_command_control: {:?}",
-                dto.extra.keys().collect::<Vec<_>>()).into());
+            return Err(format!(
+                "Unrecognized fields in cell_info.sds_command_control: {:?}",
+                dto.extra.keys().collect::<Vec<_>>()
+            )
+            .into());
         }
         use crate::bluestation::sec_cell::{CfgSdsCommandControl, CfgSdsCommandEntry};
         cell_cfg.sds_command_control = Some(CfgSdsCommandControl {
             authorized_issis: dto.authorized_issis,
-            commands: dto.commands.into_iter().map(|e| CfgSdsCommandEntry {
-                status_code: e.status_code,
-                action: e.action,
-            }).collect(),
+            commands: dto
+                .commands
+                .into_iter()
+                .map(|e| CfgSdsCommandEntry {
+                    status_code: e.status_code,
+                    action: e.action,
+                })
+                .collect(),
         });
     }
 

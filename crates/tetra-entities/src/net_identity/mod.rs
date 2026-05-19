@@ -124,7 +124,14 @@ impl IdentityResolver {
             source: IdentitySource::Brew,
         };
         let mut inner = self.inner.lock().expect("IdentityResolver mutex poisoned");
-        cache_insert_locked(&mut inner, self.cache_max_entries, self.cache_ttl, ssi, Some(record.clone()), Instant::now());
+        cache_insert_locked(
+            &mut inner,
+            self.cache_max_entries,
+            self.cache_ttl,
+            ssi,
+            Some(record.clone()),
+            Instant::now(),
+        );
         Some(record)
     }
 

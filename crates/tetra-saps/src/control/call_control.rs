@@ -107,14 +107,11 @@ pub enum CallControl {
         usage: u8,
     },
     /// Request ending a network call
-    NetworkCallEnd {
-        brew_uuid: uuid::Uuid,
-    },
+    NetworkCallEnd { brew_uuid: uuid::Uuid },
     /// UL inactivity detected on a traffic timeslot.
     UlInactivityTimeout { ts: u8 },
 
     // ---- Full-duplex individual / circuit-switched call signalling (ETSI EN 300 392-2 §14) ----
-
     /// CMCE -> Brew: local MS initiated a call to a non-local ISSI or PBX number.
     NetworkCircuitSetupRequest { brew_uuid: uuid::Uuid, call: NetworkCircuitCall },
     /// Brew -> CMCE: TetraPack accepted the circuit setup.

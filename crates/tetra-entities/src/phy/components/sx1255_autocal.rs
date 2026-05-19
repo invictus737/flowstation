@@ -1639,11 +1639,7 @@ fn repeated_iq_required_inliers(total_attempts: usize) -> usize {
 }
 
 fn repeated_dc_required_inliers(total_attempts: usize) -> usize {
-    if total_attempts <= 1 {
-        1
-    } else {
-        (total_attempts / 2 + 1).max(2)
-    }
+    if total_attempts <= 1 { 1 } else { (total_attempts / 2 + 1).max(2) }
 }
 
 fn stable_complex_value(
@@ -2189,11 +2185,7 @@ fn estimate_tone_frequency_error(
         prev_phase = Some(phase);
     }
 
-    if count == 0 {
-        0.0
-    } else {
-        sum_hz / count as RealSample
-    }
+    if count == 0 { 0.0 } else { sum_hz / count as RealSample }
 }
 
 fn tone_bins_centered_skip_clipped(
@@ -2296,11 +2288,7 @@ fn parse_temperature_c(raw: &str) -> Option<f64> {
             break;
         }
     }
-    if token.is_empty() {
-        None
-    } else {
-        token.parse::<f64>().ok()
-    }
+    if token.is_empty() { None } else { token.parse::<f64>().ok() }
 }
 
 fn is_valid_temperature_c(value: f64) -> bool {
@@ -2308,11 +2296,7 @@ fn is_valid_temperature_c(value: f64) -> bool {
 }
 
 fn temperature_unit_label(value: f64) -> &'static str {
-    if is_valid_temperature_c(value) {
-        "C"
-    } else {
-        "raw-units"
-    }
+    if is_valid_temperature_c(value) { "C" } else { "raw-units" }
 }
 
 fn clamp_frequency_correction(freq_hz: f64, ppm: f64, max_abs_hz: f64) -> f64 {
@@ -2357,14 +2341,8 @@ mod tests {
             ..CfgSx1255Autocal::default()
         };
         let selected = RxStartupCompensation {
-            dc: ComplexSample {
-                re: 0.00125,
-                im: -0.0025,
-            },
-            image_coeff: ComplexSample {
-                re: -0.45,
-                im: 0.31,
-            },
+            dc: ComplexSample { re: 0.00125, im: -0.0025 },
+            image_coeff: ComplexSample { re: -0.45, im: 0.31 },
             apply_dc: true,
             apply_iq: true,
         };
@@ -2396,21 +2374,12 @@ mod tests {
         };
         let cache = QuickCalibrationCache::from_compensation(
             RxStartupCompensation {
-                dc: ComplexSample {
-                    re: 0.001,
-                    im: -0.002,
-                },
-                image_coeff: ComplexSample {
-                    re: 0.25,
-                    im: 0.25,
-                },
+                dc: ComplexSample { re: 0.001, im: -0.002 },
+                image_coeff: ComplexSample { re: 0.25, im: 0.25 },
                 apply_dc: true,
                 apply_iq: true,
             },
-            AutocalFrequencies {
-                rx_hz: None,
-                tx_hz: None,
-            },
+            AutocalFrequencies { rx_hz: None, tx_hz: None },
         );
 
         let restored = cache.to_compensation(&cfg).expect("restore compensation");

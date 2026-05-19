@@ -134,12 +134,7 @@ fn build_network_call_start_msg(brew_uuid: Uuid, source_issi: u32, dest_gssi: u3
     build_network_call_start_msg_with_mnemonic(brew_uuid, source_issi, dest_gssi, None)
 }
 
-fn build_network_call_start_msg_with_mnemonic(
-    brew_uuid: Uuid,
-    source_issi: u32,
-    dest_gssi: u32,
-    source_mnemonic: Option<&str>,
-) -> SapMsg {
+fn build_network_call_start_msg_with_mnemonic(brew_uuid: Uuid, source_issi: u32, dest_gssi: u32, source_mnemonic: Option<&str>) -> SapMsg {
     SapMsg {
         sap: Sap::Control,
         src: TetraEntity::Brew,

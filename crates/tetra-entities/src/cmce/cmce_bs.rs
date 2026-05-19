@@ -26,9 +26,13 @@ pub struct CmceBs {
 impl CmceBs {
     pub fn new(config: SharedConfig, telemetry: Option<TelemetrySink>, control: Option<ControlEndpoint>) -> Self {
         let mut cc = CcBsSubentity::new(config.clone());
-        if let Some(ref sink) = telemetry { cc.set_telemetry(sink.clone()); }
+        if let Some(ref sink) = telemetry {
+            cc.set_telemetry(sink.clone());
+        }
         let mut sds = SdsBsSubentity::new(config.clone());
-        if let Some(ref sink) = telemetry { sds.set_telemetry(sink.clone()); }
+        if let Some(ref sink) = telemetry {
+            sds.set_telemetry(sink.clone());
+        }
         Self {
             config: config.clone(),
             telemetry,
@@ -61,8 +65,8 @@ impl CmceBs {
             ControlCommand::KickMs { issi } => {
                 let groups: Vec<u32> = cc.subscriber_groups_for(issi);
                 if !groups.is_empty() {
-                    use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
                     use tetra_core::Sap;
+                    use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
                     queue.push_back(tetra_saps::SapMsg {
                         sap: Sap::Control,
                         src: TetraEntity::Cmce,
@@ -97,7 +101,8 @@ impl CmceBs {
     pub fn rx_lcmc_mle_unitdata_ind(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_lcmc_mle_unitdata_ind");
         let SapMsgInner::LcmcMleUnitdataInd(prim) = &mut message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error"); return;
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
         };
         let Some(bits) = prim.sdu.peek_bits(5) else {
             tracing::warn!("insufficient bits: {}", prim.sdu.dump_bin());
@@ -116,9 +121,15 @@ impl CmceBs {
             | CmcePduTypeUl::USetup
             | CmcePduTypeUl::UTxCeased
             | CmcePduTypeUl::UTxDemand
-            | CmcePduTypeUl::UCallRestore => { self.cc.route_xx_deliver(queue, message); }
-            CmcePduTypeUl::UStatus => { self.sds.route_status_deliver(queue, message); }
-            CmcePduTypeUl::USdsData => { self.sds.route_rf_deliver(queue, message); }
+            | CmcePduTypeUl::UCallRestore => {
+                self.cc.route_xx_deliver(queue, message);
+            }
+            CmcePduTypeUl::UStatus => {
+                self.sds.route_status_deliver(queue, message);
+            }
+            CmcePduTypeUl::USdsData => {
+                self.sds.route_rf_deliver(queue, message);
+            }
             CmcePduTypeUl::UFacility => {
                 // ETSI EN 300 392-2 §14.7.2.5:
                 // U-FACILITY carries call-unrelated supplementary-service data and
@@ -140,21 +151,29 @@ impl CmceBs {
                     });
                 }
             }
-            CmcePduTypeUl::CmceFunctionNotSupported => { unimplemented_log!("{:?}", pdu_type); }
+            CmcePduTypeUl::CmceFunctionNotSupported => {
+                unimplemented_log!("{:?}", pdu_type);
+            }
         };
     }
 }
 
 impl TetraEntityTrait for CmceBs {
-    fn entity(&self) -> TetraEntity { TetraEntity::Cmce }
+    fn entity(&self) -> TetraEntity {
+        TetraEntity::Cmce
+    }
 
-    fn set_config(&mut self, config: SharedConfig) { self.config = config; }
+    fn set_config(&mut self, config: SharedConfig) {
+        self.config = config;
+    }
 
     fn tick_start(&mut self, queue: &mut MessageQueue, ts: TdmaTime) {
         self.sds.tick_start(queue, ts);
         let call_events = self.cc.tick_start_with_events(queue, ts);
         if let Some(sink) = &self.telemetry {
-            for event in call_events { sink.send(event); }
+            for event in call_events {
+                sink.send(event);
+            }
         }
         if let Some(cep) = &self.control {
             while let Some(cmd) = cep.try_recv() {
@@ -185,14 +204,26 @@ impl TetraEntityTrait for CmceBs {
         tracing::debug!("rx_prim: {:?}", message);
         match message.sap {
             Sap::LcmcSap => match message.msg {
-                SapMsgInner::LcmcMleUnitdataInd(_) => { self.rx_lcmc_mle_unitdata_ind(queue, message); }
-                _ => { tracing::warn!("CMCE: unexpected message on LcmcSap: {:?}, ignoring", message.msg); }
+                SapMsgInner::LcmcMleUnitdataInd(_) => {
+                    self.rx_lcmc_mle_unitdata_ind(queue, message);
+                }
+                _ => {
+                    tracing::warn!("CMCE: unexpected message on LcmcSap: {:?}, ignoring", message.msg);
+                }
             },
             Sap::Control => match message.msg {
-                SapMsgInner::CmceCallControl(_) => { self.cc.rx_call_control(queue, message); }
-                SapMsgInner::MmSubscriberUpdate(update) => { self.cc.handle_subscriber_update(queue, update); }
-                SapMsgInner::CmceSdsData(_) => { self.sds.rx_sds_from_brew(queue, message); }
-                _ => { tracing::warn!("CMCE: unexpected control message: {:?}, ignoring", message.msg); }
+                SapMsgInner::CmceCallControl(_) => {
+                    self.cc.rx_call_control(queue, message);
+                }
+                SapMsgInner::MmSubscriberUpdate(update) => {
+                    self.cc.handle_subscriber_update(queue, update);
+                }
+                SapMsgInner::CmceSdsData(_) => {
+                    self.sds.rx_sds_from_brew(queue, message);
+                }
+                _ => {
+                    tracing::warn!("CMCE: unexpected control message: {:?}, ignoring", message.msg);
+                }
             },
             Sap::TmdSap => {
                 // UL voice frame — feed to echo session if active, and forward to Brew for FDX calls
@@ -206,7 +237,9 @@ impl TetraEntityTrait for CmceBs {
                     queue.push_back(message);
                 }
             }
-            _ => { tracing::warn!("CMCE: unexpected SAP {:?}, ignoring", message.sap); }
+            _ => {
+                tracing::warn!("CMCE: unexpected SAP {:?}, ignoring", message.sap);
+            }
         }
     }
 }

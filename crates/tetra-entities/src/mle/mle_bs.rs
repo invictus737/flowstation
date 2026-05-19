@@ -37,7 +37,8 @@ impl MleBs {
             match message.msg {
                 SapMsgInner::TlaTlDataIndBl(prim) => prim.tl_sdu,
                 _ => {
-                    tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                    tracing::error!("BUG: unexpected message or state -- routing error");
+                    return;
                 }
             }
         };
@@ -95,7 +96,8 @@ impl MleBs {
                 tracing::warn!("MLE: BS received unexpected TL-UNITDATA, ignoring");
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }
@@ -103,14 +105,18 @@ impl MleBs {
     fn rx_tla_data_ind_bl(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         // Take ownership of bitbuf and read protocol discriminator
         let SapMsgInner::TlaTlDataIndBl(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
         let Some(mut sdu) = prim.tl_sdu.take() else {
             tracing::warn!("MLE: rx_tla_data_ind_bl received message with no tl_sdu, ignoring");
             return;
         };
         if sdu.get_pos() != 0 {
-            tracing::warn!("MLE: rx_tla_data_ind_bl sdu not at start position (pos={}), seeking to 0", sdu.get_pos());
+            tracing::warn!(
+                "MLE: rx_tla_data_ind_bl sdu not at start position (pos={}), seeking to 0",
+                sdu.get_pos()
+            );
             sdu.seek(0);
         }
         let Some(bits) = sdu.read_bits(3) else {
@@ -190,8 +196,9 @@ impl MleBs {
     fn rx_lmm_mle_unitdata_req(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_lmm_mle_unitdata_req");
         let SapMsgInner::LmmMleUnitdataReq(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let mle_prot_discriminator = MleProtocolDiscriminator::Mm;
         let sdu_len = prim.sdu.get_len();
@@ -237,7 +244,9 @@ impl MleBs {
             SapMsgInner::LmmMleUnitdataReq(_prim) => {
                 self.rx_lmm_mle_unitdata_req(queue, message);
             }
-            _ => { tracing::warn!("unhandled match variant, ignoring"); }
+            _ => {
+                tracing::warn!("unhandled match variant, ignoring");
+            }
         }
     }
 
@@ -254,8 +263,9 @@ impl MleBs {
     fn rx_lcmc_mle_unitdata_req(&mut self, queue: &mut MessageQueue, mut message: SapMsg) {
         tracing::trace!("rx_lcmc_mle_unitdata_req");
         let SapMsgInner::LcmcMleUnitdataReq(prim) = &mut message.msg else {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
-            };
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
 
         let mle_prot_discriminator = MleProtocolDiscriminator::Cmce;
         let sdu_len = prim.sdu.get_len();
@@ -328,7 +338,9 @@ impl MleBs {
             SapMsgInner::LcmcMleUnitdataReq(_) => {
                 self.rx_lcmc_mle_unitdata_req(queue, message);
             }
-            _ => { tracing::warn!("unhandled match variant, ignoring"); }
+            _ => {
+                tracing::warn!("unhandled match variant, ignoring");
+            }
         }
     }
 }
@@ -343,10 +355,7 @@ impl TetraEntityTrait for MleBs {
         // Use a constant multiframe/frame offset to avoid congestion with other
         // hyperframe-triggered events.
         if ts.m == MLE_BROADCAST_MULTIFRAME && ts.f == MLE_BROADCAST_FRAME && ts.t == 1 {
-            tracing::debug!(
-                "MLE: hyperframe broadcast slot (hf={} m={} f={} t={})",
-                ts.h, ts.m, ts.f, ts.t
-            );
+            tracing::debug!("MLE: hyperframe broadcast slot (hf={} m={} f={} t={})", ts.h, ts.m, ts.f, ts.t);
             self.broadcast.send_broadcast(queue);
         }
     }
@@ -375,7 +384,8 @@ impl TetraEntityTrait for MleBs {
                 self.rx_lcmc_prim(queue, message);
             }
             _ => {
-                tracing::error!("BUG: unexpected message or state -- routing error"); return;
+                tracing::error!("BUG: unexpected message or state -- routing error");
+                return;
             }
         }
     }
