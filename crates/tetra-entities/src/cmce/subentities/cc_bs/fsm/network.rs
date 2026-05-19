@@ -681,6 +681,20 @@ impl CcBsSubentity {
         let usage = circuit.usage;
         self.tpi_start_context(call_id, TpiCallType::Group, source_issi, false);
         let tpi_facility = self.tpi_inform_for_call(call_id);
+        let motorola_tpi_mode: MotorolaTpiTestMode = self.motorola_tpi_test_mode(dest_gssi);
+        let suppress_setup_caller = self.motorola_tpi_setup_suppresses_caller(dest_gssi) && tpi_facility.is_some();
+        let setup_calling_party_address_ssi = if suppress_setup_caller {
+            tracing::info!(
+                "CMCE Motorola SS-TPI test {:?}: suppressing D-SETUP caller SSI call_id={} gssi={} source={}",
+                motorola_tpi_mode,
+                call_id,
+                dest_gssi,
+                source_issi
+            );
+            None
+        } else {
+            Some(source_issi)
+        };
 
         tracing::info!(
             "CMCE: starting NEW network call brew_uuid={} gssi={} speaker={} ts={} call_id={}",
@@ -717,7 +731,7 @@ impl CcBsSubentity {
             call_priority: 0,
             notification_indicator: None,
             temporary_address: None,
-            calling_party_address_ssi: Some(source_issi),
+            calling_party_address_ssi: setup_calling_party_address_ssi,
             calling_party_extension: None,
             external_subscriber_number: None,
             facility: tpi_facility.clone(),
@@ -787,6 +801,17 @@ impl CcBsSubentity {
             }),
         };
         queue.push_back(connect_msg);
+
+        if self.motorola_tpi_emits_initial_tx_granted(dest_gssi) {
+            tracing::info!(
+                "CMCE Motorola SS-TPI test {:?}: sending initial D-TX GRANTED probe call_id={} gssi={} source={}",
+                motorola_tpi_mode,
+                call_id,
+                dest_gssi,
+                source_issi
+            );
+            self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts);
+        }
 
         self.active_calls.insert(
             call_id,

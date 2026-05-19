@@ -120,6 +120,7 @@ impl CcBsSubentity {
         ts: u8,
     ) {
         let tpi_facility = self.tpi_inform_for_call(call_id);
+        let suppress_setup_caller = self.motorola_tpi_setup_suppresses_caller(dest_gssi) && tpi_facility.is_some();
         let Some(cached) = self.cached_setups.get_mut(&call_id) else {
             tracing::debug!(
                 "CMCE: skipping group D-SETUP refresh for call_id={} gssi={} source={} (no cached setup)",
@@ -140,7 +141,17 @@ impl CcBsSubentity {
         }
 
         cached.dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
-        cached.pdu.calling_party_address_ssi = Some(source_issi);
+        cached.pdu.calling_party_address_ssi = if suppress_setup_caller {
+            tracing::info!(
+                "CMCE Motorola SS-TPI test: suppressing D-SETUP caller SSI on refresh call_id={} gssi={} source={}",
+                call_id,
+                dest_gssi,
+                source_issi
+            );
+            None
+        } else {
+            Some(source_issi)
+        };
         cached.pdu.transmission_grant = TransmissionGrant::GrantedToOtherUser;
         cached.pdu.transmission_request_permission = false;
         cached.pdu.facility = tpi_facility;
@@ -834,7 +845,7 @@ impl CcBsSubentity {
             transmitting_party_address_ssi: Some(source_issi as u64),
             transmitting_party_extension: None,
             external_subscriber_number: None,
-            facility: None,
+            facility: self.motorola_tpi_tx_granted_facility(call_id, dest_gssi),
             dm_ms_address: None,
             proprietary: None,
         };

@@ -55,7 +55,7 @@ use echo::EchoSession;
 
 use call::{ActiveCall, CallOrigin, GroupCallState, IndividualCall, IndividualCallState, TxDemandQueueResult};
 use fsm::{GroupTransitionError, IndividualTransitionError};
-use tpi::{TpiCallContext, TpiCallType};
+use tpi::{MotorolaTpiTestMode, TpiCallContext, TpiCallType};
 
 struct CachedSetup {
     pdu: DSetup,

@@ -4,6 +4,14 @@ use super::*;
 use crate::net_identity::{IdentityRecord, IdentityResolver, normalize_mnemonic};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum MotorolaTpiTestMode {
+    Off,
+    TxGranted,
+    SetupMnemonicOnly,
+    SetupPulse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TpiCallType {
     Group,
     IndividualHalfDuplex,
@@ -105,6 +113,48 @@ impl CcBsSubentity {
 
     pub(super) fn tpi_end_context(&mut self, call_id: u16) {
         self.tpi_contexts.remove(&call_id);
+    }
+
+    pub(super) fn motorola_tpi_test_mode(&self, dest_gssi: u32) -> MotorolaTpiTestMode {
+        let target_gssi = std::env::var("FLOWSTATION_MOTOROLA_TPI_GSSI")
+            .ok()
+            .and_then(|value| value.trim().parse::<u32>().ok());
+        if target_gssi != Some(dest_gssi) {
+            return MotorolaTpiTestMode::Off;
+        }
+
+        match std::env::var("FLOWSTATION_MOTOROLA_TPI_TEST")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "a" | "tx-granted" | "d-tx-granted" => MotorolaTpiTestMode::TxGranted,
+            "b" | "setup-mnemonic-only" | "mnemonic-only" => MotorolaTpiTestMode::SetupMnemonicOnly,
+            "c" | "setup-pulse" | "pulse" => MotorolaTpiTestMode::SetupPulse,
+            _ => MotorolaTpiTestMode::Off,
+        }
+    }
+
+    pub(super) fn motorola_tpi_setup_suppresses_caller(&self, dest_gssi: u32) -> bool {
+        matches!(
+            self.motorola_tpi_test_mode(dest_gssi),
+            MotorolaTpiTestMode::SetupMnemonicOnly | MotorolaTpiTestMode::SetupPulse
+        )
+    }
+
+    pub(super) fn motorola_tpi_tx_granted_facility(&self, call_id: u16, dest_gssi: u32) -> Option<SsTpiInform> {
+        match self.motorola_tpi_test_mode(dest_gssi) {
+            MotorolaTpiTestMode::TxGranted | MotorolaTpiTestMode::SetupPulse => self.tpi_inform_for_call(call_id),
+            MotorolaTpiTestMode::Off | MotorolaTpiTestMode::SetupMnemonicOnly => None,
+        }
+    }
+
+    pub(super) fn motorola_tpi_emits_initial_tx_granted(&self, dest_gssi: u32) -> bool {
+        matches!(
+            self.motorola_tpi_test_mode(dest_gssi),
+            MotorolaTpiTestMode::TxGranted | MotorolaTpiTestMode::SetupPulse
+        )
     }
 
     fn tpi_resolve_mnemonic(&self, issi: u32) -> Option<String> {
