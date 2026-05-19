@@ -1274,3 +1274,34 @@ fn http_response(mut stream: TcpStream, code: u16, body: &str) {
     );
     let _ = stream.write_all(resp.as_bytes());
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rapid_reused_group_call_replaces_dashboard_row() {
+        let server = DashboardServer::new("test.toml".to_string());
+
+        server.handle_telemetry(TelemetryEvent::GroupCallStarted {
+            call_id: 7,
+            gssi: 91,
+            caller_issi: 2_260_571,
+            ts: 2,
+        });
+        server.handle_telemetry(TelemetryEvent::GroupCallEnded { call_id: 7, gssi: 91 });
+        server.handle_telemetry(TelemetryEvent::GroupCallStarted {
+            call_id: 7,
+            gssi: 91,
+            caller_issi: 2_260_580,
+            ts: 2,
+        });
+
+        let state = server.state.read().unwrap();
+        assert_eq!(state.calls.len(), 1);
+        let call = state.calls.get(&7).expect("new call segment should be visible");
+        assert_eq!(call.caller_issi, 2_260_580);
+        assert_eq!(call.speaker_issi, Some(2_260_580));
+        assert!(call.started_at.elapsed().as_secs() < 1);
+    }
+}

@@ -189,11 +189,13 @@ impl CcBsSubentity {
         );
         self.send_d_tx_granted_facch(queue, call_id, requesting_party.ssi, dest_addr.ssi, ts);
 
-        // Notify dashboard that the speaker changed (hangtime -> new speaker).
-        self.emit(crate::net_telemetry::TelemetryEvent::GroupCallSpeakerChanged {
+        // The RF call remains cached during hangtime, but the dashboard should
+        // treat a fresh floor grant as a new visible call segment.
+        self.emit(crate::net_telemetry::TelemetryEvent::GroupCallStarted {
             call_id,
             gssi: dest_ssi,
-            speaker_issi: requesting_party.ssi,
+            caller_issi: requesting_party.ssi,
+            ts,
         });
 
         if net_brew::is_brew_gssi_routable(&self.config, dest_ssi) {
@@ -313,6 +315,10 @@ impl CcBsSubentity {
             });
         }
 
+        // Dashboard active calls represent active speech, not the internal
+        // hangtime cache. Close the visible row immediately on floor release.
+        self.emit(crate::net_telemetry::TelemetryEvent::GroupCallEnded { call_id, gssi: dest_ssi });
+
         Ok(())
     }
 
@@ -362,6 +368,15 @@ impl CcBsSubentity {
             }),
         });
 
+        // Existing network group calls are reused during hangtime. Surface each
+        // new Brew speaker as a new active dashboard call segment.
+        self.emit(crate::net_telemetry::TelemetryEvent::GroupCallStarted {
+            call_id,
+            gssi: dest_gssi,
+            caller_issi: source_issi,
+            ts,
+        });
+
         Ok(())
     }
 
@@ -389,6 +404,10 @@ impl CcBsSubentity {
                 src: TetraEntity::Cmce,
                 dest: TetraEntity::Umac,
                 msg: SapMsgInner::CmceCallControl(CallControl::FloorReleased { call_id, ts: call.ts }),
+            });
+            self.emit(crate::net_telemetry::TelemetryEvent::GroupCallEnded {
+                call_id,
+                gssi: call.dest_gssi,
             });
             return Ok(());
         }
