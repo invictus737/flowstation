@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -23,7 +24,11 @@ type CmdSender = crossbeam_channel::Sender<ControlCommand>;
 // Each WS connection registers a Sender here.
 // broadcast() sends to all of them; dead connections are pruned automatically.
 type WsBroadcastTx = crossbeam_channel::Sender<String>;
-type WsClients = Arc<Mutex<Vec<WsBroadcastTx>>>;
+struct WsClient {
+    tx: WsBroadcastTx,
+    rf_active: Arc<AtomicBool>,
+}
+type WsClients = Arc<Mutex<Vec<WsClient>>>;
 
 // ---------------------------------------------------------------------------
 // OTA update state — shared between the HTTP handler and the update thread.
@@ -68,7 +73,7 @@ const MAX_CONFIG_BODY_BYTES: usize = 256 * 1024;
 const MAX_PROFILE_BODY_BYTES: usize = 1024;
 const RSSI_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(750);
 const TS_VOICE_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
-const RF_MONITOR_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+const RF_MONITOR_BROADCAST_INTERVAL: std::time::Duration = std::time::Duration::from_millis(67);
 
 fn find_git_source_dir(config_path: &str) -> Option<PathBuf> {
     if let Ok(value) = std::env::var(UPDATE_SOURCE_DIR_ENV) {
@@ -496,7 +501,11 @@ impl DashboardServer {
         }
         if self.should_broadcast_telemetry(&event) {
             if let Some(json) = msg {
-                self.broadcast(&json);
+                if Self::is_rf_monitor_event(&event) {
+                    self.broadcast_rf(&json);
+                } else {
+                    self.broadcast(&json);
+                }
             }
         }
     }
@@ -518,10 +527,24 @@ impl DashboardServer {
 
     fn broadcast(&self, msg: &str) {
         let mut clients = self.clients.lock().unwrap();
-        clients.retain(|tx| match tx.try_send(msg.to_owned()) {
+        clients.retain(|client| match client.tx.try_send(msg.to_owned()) {
             Ok(()) => true,
             Err(crossbeam_channel::TrySendError::Full(_)) => true,
             Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
+        });
+    }
+
+    fn broadcast_rf(&self, msg: &str) {
+        let mut clients = self.clients.lock().unwrap();
+        clients.retain(|client| {
+            if !client.rf_active.load(Ordering::Relaxed) {
+                return true;
+            }
+            match client.tx.try_send(msg.to_owned()) {
+                Ok(()) => true,
+                Err(crossbeam_channel::TrySendError::Full(_)) => true,
+                Err(crossbeam_channel::TrySendError::Disconnected(_)) => false,
+            }
         });
     }
 
@@ -554,6 +577,9 @@ impl DashboardServer {
                 should_send
             }
             TelemetryEvent::TxMonitor { .. } | TelemetryEvent::RfLoopbackMonitor { .. } => {
+                if !self.has_rf_subscribers() {
+                    return false;
+                }
                 let now = std::time::Instant::now();
                 let Ok(mut last) = self.rf_last_broadcast.try_lock() else {
                     return false;
@@ -566,6 +592,17 @@ impl DashboardServer {
             }
             _ => true,
         }
+    }
+
+    fn has_rf_subscribers(&self) -> bool {
+        let Ok(clients) = self.clients.try_lock() else {
+            return false;
+        };
+        clients.iter().any(|client| client.rf_active.load(Ordering::Relaxed))
+    }
+
+    fn is_rf_monitor_event(event: &TelemetryEvent) -> bool {
+        matches!(event, TelemetryEvent::TxMonitor { .. } | TelemetryEvent::RfLoopbackMonitor { .. })
     }
 }
 
@@ -878,9 +915,13 @@ fn handle_ws(
 
     // Register this connection for broadcasts
     let (broadcast_tx, broadcast_rx) = crossbeam_channel::bounded::<String>(256);
+    let rf_active = Arc::new(AtomicBool::new(false));
     {
         let mut c = clients.lock().unwrap();
-        c.push(broadcast_tx);
+        c.push(WsClient {
+            tx: broadcast_tx,
+            rf_active: Arc::clone(&rf_active),
+        });
     }
 
     // Send initial snapshot
@@ -911,6 +952,7 @@ fn handle_ws(
         // Drain outbound broadcast messages first
         while let Ok(msg) = broadcast_rx.try_recv() {
             if ws.send(Message::Text(msg)).is_err() {
+                rf_active.store(false, Ordering::Relaxed);
                 return;
             }
         }
@@ -918,7 +960,7 @@ fn handle_ws(
         // Then check for inbound messages from browser
         match ws.read() {
             Ok(Message::Text(text)) => {
-                handle_ws_command(&text, &state, &cmd_tx, &phy_cmd_tx, &update_state);
+                handle_ws_command(&text, &state, &cmd_tx, &phy_cmd_tx, &update_state, &rf_active);
             }
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(data)) => {
@@ -930,6 +972,7 @@ fn handle_ws(
             Err(_) => break,
         }
     }
+    rf_active.store(false, Ordering::Relaxed);
 }
 
 fn rf_gain_snapshot(config_path: &str) -> Vec<serde_json::Value> {
@@ -955,6 +998,7 @@ fn handle_ws_command(
     cmd_tx: &Arc<Mutex<Option<CmdSender>>>,
     phy_cmd_tx: &Arc<Mutex<Option<CmdSender>>>,
     _update_state: &SharedUpdateState,
+    rf_active: &Arc<AtomicBool>,
 ) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(text) else {
         return;
@@ -978,6 +1022,9 @@ fn handle_ws_command(
     };
 
     match v.get("type").and_then(|t| t.as_str()) {
+        Some("rf_monitor_active") => {
+            rf_active.store(v.get("active").and_then(|a| a.as_bool()).unwrap_or(false), Ordering::Relaxed);
+        }
         Some("set_rf_gain") => {
             let Some(direction) = v.get("direction").and_then(|d| d.as_str()) else {
                 return;
