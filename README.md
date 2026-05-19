@@ -69,7 +69,7 @@ cargo build --release
 
 **Requirements:** Rust (latest stable), SoapySDR with drivers for your SDR.
 
-The binary is at `target/release/bluestation-bs`.
+Cargo builds the internal binary at `target/release/bluestation-bs`. GitHub releases publish it as `flowstation-bs`.
 
 ---
 

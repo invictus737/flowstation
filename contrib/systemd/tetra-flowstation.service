@@ -7,7 +7,7 @@
 #
 # This example assumes:
 #   - the service user is "pi"
-#   - the binary or symlink is /home/pi/flowstation/bluestation-bs-rpi4
+#   - the binary or symlink is /home/pi/flowstation/flowstation-bs
 #   - the config file is /home/pi/flowstation/config.toml
 #
 # Adjust paths and RF scheduling policy for your deployment.
@@ -20,7 +20,7 @@ After=network.target
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/flowstation
-ExecStart=/usr/bin/chrt -f 99 /home/pi/flowstation/bluestation-bs-rpi4 /home/pi/flowstation/config.toml
+ExecStart=/usr/bin/chrt -f 99 /home/pi/flowstation/flowstation-bs /home/pi/flowstation/config.toml
 
 Restart=on-failure
 RestartSec=5s
