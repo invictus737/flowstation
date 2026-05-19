@@ -27,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libsoapysdr-dev
+          sudo apt-get install -y libsoapysdr-dev binutils-aarch64-linux-gnu
 
       - name: Test workspace
         run: cargo test --workspace --locked
@@ -38,6 +38,7 @@ jobs:
       - name: Prepare release binary
         run: |
           cp target/aarch64-unknown-linux-gnu/release/bluestation-bs target/aarch64-unknown-linux-gnu/release/flowstation-bs
+          aarch64-linux-gnu-strip --strip-unneeded target/aarch64-unknown-linux-gnu/release/flowstation-bs
           chmod +x target/aarch64-unknown-linux-gnu/release/flowstation-bs
 
       - name: Generate checksum
