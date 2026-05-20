@@ -9,6 +9,7 @@ use tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier;
 use tetra_pdus::cmce::enums::transmission_grant::TransmissionGrant;
 use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation;
 use tetra_pdus::cmce::pdus::d_setup::DSetup;
+use tetra_pdus::cmce::pdus::d_tx_ceased::DTxCeased;
 use tetra_pdus::cmce::pdus::d_tx_granted::DTxGranted;
 use tetra_pdus::cmce::pdus::u_facility::UFacility;
 use tetra_pdus::cmce::pdus::u_release::URelease;
@@ -267,6 +268,21 @@ fn has_group_floor_released(msgs: &[SapMsg], call_id: u16) -> bool {
             SapMsgInner::CmceCallControl(CallControl::FloorReleased { call_id: id, .. }) if *id == call_id
         )
     })
+}
+
+fn parsed_d_tx_ceased(msgs: &[SapMsg]) -> Vec<DTxCeased> {
+    msgs.iter()
+        .filter_map(|msg| {
+            if msg.dest != TetraEntity::Mle {
+                return None;
+            }
+            let SapMsgInner::LcmcMleUnitdataReq(prim) = &msg.msg else {
+                return None;
+            };
+            let mut sdu = BitBuffer::from_bitstr(&prim.sdu.to_bitstr());
+            DTxCeased::from_bitbuf(&mut sdu).ok()
+        })
+        .collect()
 }
 
 #[test]
@@ -606,5 +622,19 @@ fn test_group_call_rejects_unauthorized_release_and_non_speaker_tx_ceased() {
     assert!(
         has_group_floor_released(&owner_ceased_msgs, call_id),
         "current speaker U-TX-CEASED should still release the floor"
+    );
+
+    test.submit_message(build_u_tx_ceased_msg(TEST_ISSI, call_id));
+    test.run_stack(Some(4));
+    let duplicate_ceased_msgs = test.dump_sinks();
+    assert!(
+        parsed_d_tx_ceased(&duplicate_ceased_msgs)
+            .iter()
+            .any(|pdu| pdu.call_identifier == call_id),
+        "duplicate U-TX-CEASED from the last speaker during hangtime should retransmit D-TX-CEASED"
+    );
+    assert!(
+        !has_group_floor_released(&duplicate_ceased_msgs, call_id),
+        "duplicate U-TX-CEASED during hangtime must not emit a second floor-release control event"
     );
 }

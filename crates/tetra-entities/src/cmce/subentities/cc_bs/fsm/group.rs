@@ -230,6 +230,26 @@ impl CcBsSubentity {
         };
 
         let state = call.state();
+        if matches!(state, GroupCallState::NoActiveSpeaker { .. }) {
+            if call.source_issi == sender.ssi {
+                let ts = call.ts;
+                let dest_gssi = call.dest_gssi;
+                tracing::debug!(
+                    "FSM: duplicate U-TX CEASED call_id={} from last speaker ISSI {} during hangtime; retransmitting D-TX CEASED",
+                    call_id,
+                    sender.ssi
+                );
+                self.send_d_tx_ceased_facch(queue, call_id, dest_gssi, ts);
+                return Ok(());
+            }
+
+            return Err(GroupTransitionError::NotCurrentSpeaker {
+                call_id,
+                sender_issi: sender.ssi,
+                current_speaker_issi: call.source_issi,
+            });
+        }
+
         Self::validate_group_transition(call_id, state, GroupEvent::TxCeased)?;
 
         if !call.is_current_speaker(sender.ssi) {
