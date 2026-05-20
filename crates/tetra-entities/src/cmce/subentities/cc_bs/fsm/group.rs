@@ -376,7 +376,6 @@ impl CcBsSubentity {
 
         self.tpi_update_talker(call_id, source_issi);
         self.fsm_send_floor_granted_to_umac(queue, call_id, source_issi, dest_gssi, ts, false);
-        self.send_group_d_setup_refresh(queue, call_id, source_issi, dest_gssi, usage, ts);
         self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts);
 
         queue.push_back(SapMsg {

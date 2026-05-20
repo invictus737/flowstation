@@ -286,7 +286,7 @@ fn parsed_d_tx_ceased(msgs: &[SapMsg]) -> Vec<DTxCeased> {
 }
 
 #[test]
-fn test_network_hangtime_reuse_refreshes_group_dsetup_with_tpi_mnemonic() {
+fn test_network_hangtime_reuse_does_not_refresh_group_dsetup_during_traffic() {
     debug::setup_logging_verbose();
 
     const FIRST_SPEAKER: u32 = 2_260_571;
@@ -334,18 +334,13 @@ fn test_network_hangtime_reuse_refreshes_group_dsetup_with_tpi_mnemonic() {
     test.run_stack(Some(2));
     let msgs = test.dump_sinks();
 
-    let refreshed_setup = decode_d_setups(&msgs)
+    let refreshed_setups = decode_d_setups(&msgs)
         .into_iter()
-        .find(|setup| setup.calling_party_address_ssi == Some(SECOND_SPEAKER))
-        .expect("hangtime reuse must immediately refresh group D-SETUP for the new Brew speaker");
-    assert_eq!(refreshed_setup.transmission_grant, TransmissionGrant::GrantedToOtherUser);
-    let facility = refreshed_setup
-        .facility
-        .expect("refreshed group D-SETUP must carry SS-TPI for RX display");
-    assert_eq!(facility.mnemonic_name.as_deref(), Some("YO3TCO"));
-    assert_eq!(
-        facility.talking_sending_party_ssi, None,
-        "group D-SETUP already carries the caller SSI; SS-TPI should add mnemonic only"
+        .filter(|setup| setup.calling_party_address_ssi == Some(SECOND_SPEAKER))
+        .collect::<Vec<_>>();
+    assert!(
+        refreshed_setups.is_empty(),
+        "hangtime speaker changes must not inject a refreshed group D-SETUP into active traffic"
     );
 
     let granted = decode_d_tx_granted(&msgs)
@@ -359,7 +354,7 @@ fn test_network_hangtime_reuse_refreshes_group_dsetup_with_tpi_mnemonic() {
 }
 
 #[test]
-fn test_network_group_setup_uses_brew_v1_mnemonic_without_manual_identity() {
+fn test_network_group_setup_suppresses_brew_v1_mnemonic_over_air() {
     debug::setup_logging_verbose();
 
     const BREW_SPEAKER: u32 = 4_041_258;
@@ -402,11 +397,10 @@ fn test_network_group_setup_uses_brew_v1_mnemonic_without_manual_identity() {
         .into_iter()
         .find(|setup| setup.calling_party_address_ssi == Some(BREW_SPEAKER))
         .expect("Brew-started group call should emit D-SETUP");
-    let facility = setup
-        .facility
-        .expect("Brew v1 mnemonic should feed SS-TPI immediately, before RadioID cache resolves");
-    assert_eq!(facility.mnemonic_name.as_deref(), Some("VU3JRZ"));
-    assert_eq!(facility.talking_sending_party_ssi, None);
+    assert!(
+        setup.facility.is_none(),
+        "Brew v1 mnemonic must stay local; SS-TPI over-air display is disabled for Motorola RX stability"
+    );
 }
 
 #[test]

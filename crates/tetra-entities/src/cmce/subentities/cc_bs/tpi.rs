@@ -80,30 +80,11 @@ impl CcBsSubentity {
     }
 
     pub(super) fn tpi_inform_for_call(&self, call_id: u16) -> Option<SsTpiInform> {
-        let cfg = self.config.config();
-        if !cfg.identity.enabled {
-            return None;
-        }
-
-        let ctx = self.tpi_contexts.get(&call_id)?;
-        if ctx.clir_invoked {
-            return Some(SsTpiInform::clir());
-        }
-
-        let mnemonic = if cfg.identity.emit_mnemonic_name && cfg.identity.subscription_allows_mnemonic {
-            ctx.talker_mnemonic.clone()
-        } else {
-            None
-        };
-
-        match (ctx.call_type, mnemonic) {
-            // For group call D-SETUP, the talking/sending party identity is
-            // already encoded as calling_party_address_ssi. SS-TPI only needs
-            // to add the mnemonic name for RX terminal display.
-            (TpiCallType::Group, Some(mnemonic)) => Some(SsTpiInform::mnemonic_only(mnemonic)),
-            (TpiCallType::Group, None) => None,
-            (_, mnemonic) => Some(SsTpiInform::for_ssi(ctx.current_talker_issi, mnemonic)),
-        }
+        // Motorola RX stability takes priority over optional SS-TPI display.
+        // Keep the identity cache/context populated for local use, but do not
+        // emit SS-TPI facility elements over the air.
+        let _ = call_id;
+        None
     }
 
     pub(super) fn tpi_for_speaker(&mut self, call_id: u16, talker_issi: u32) -> Option<SsTpiInform> {
