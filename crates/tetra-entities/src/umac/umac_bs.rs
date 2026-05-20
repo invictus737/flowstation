@@ -566,6 +566,7 @@ impl UmacBs {
                         pdu: sdu,
                         main_address: addr,
                         scrambling_code: prim.scrambling_code,
+                        time: Some(msg_dltime),
                         endpoint_id: 0,        // TODO FIXME
                         new_endpoint_id: None, // TODO FIXME
                         css_endpoint_id: None, // TODO FIXME
@@ -739,6 +740,7 @@ impl UmacBs {
                         pdu: sdu,
                         main_address: addr,
                         scrambling_code: prim.scrambling_code,
+                        time: Some(msg_dltime),
                         endpoint_id: 0,        // TODO FIXME
                         new_endpoint_id: None, // TODO FIXME
                         css_endpoint_id: None, // TODO FIXME
@@ -905,6 +907,7 @@ impl UmacBs {
                 pdu: Some(defragbuf.buffer),
                 main_address: defragbuf.addr,
                 scrambling_code: prim.scrambling_code,
+                time: Some(msg_dltime),
                 endpoint_id: 0,              // TODO FIXME
                 new_endpoint_id: None,       // TODO FIXME
                 css_endpoint_id: None,       // TODO FIXME
@@ -1023,6 +1026,7 @@ impl UmacBs {
                 pdu: Some(defragbuf.buffer),
                 main_address: defragbuf.addr,
                 scrambling_code: prim.scrambling_code,
+                time: Some(msg_dltime),
                 endpoint_id: 0,              // TODO FIXME
                 new_endpoint_id: None,       // TODO FIXME
                 css_endpoint_id: None,       // TODO FIXME
@@ -1077,6 +1081,7 @@ impl UmacBs {
 
         let sdu = BitBuffer::from_bitbuffer_pos(&prim.pdu);
         tracing::debug!("rx_ul_mac_u_signal: forwarding {} bit TM-SDU to LLC", sdu.get_len());
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
 
         // Forward to LLC via TMA-SAP, same path as MAC-DATA.
         // Address is not known from MAC-U-SIGNAL (no address field); use a placeholder.
@@ -1089,6 +1094,7 @@ impl UmacBs {
                 pdu: Some(sdu),
                 main_address: TetraAddress::issi(0), // Address unknown from MAC-U-SIGNAL
                 scrambling_code: prim.scrambling_code,
+                time: Some(msg_dltime),
                 endpoint_id: 0,
                 new_endpoint_id: None,
                 css_endpoint_id: None,

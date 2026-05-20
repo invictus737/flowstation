@@ -1,4 +1,4 @@
-use tetra_core::{BitBuffer, EndpointId, TetraAddress, Todo, TxReporter};
+use tetra_core::{BitBuffer, EndpointId, TdmaTime, TetraAddress, Todo, TxReporter};
 
 use crate::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
 
@@ -78,6 +78,12 @@ pub struct TmaUnitdataInd {
     pub pdu: Option<BitBuffer>,
     pub main_address: TetraAddress,
     pub scrambling_code: u32,
+    /// Actual TDMA time of the received MAC block when known.
+    ///
+    /// BS LLC uses this to return BL-ACK on the same traffic slot as the
+    /// uplink TM-SDU. Falling back to local tick time is unsafe when routing
+    /// queues delay the primitive by one or more slots.
+    pub time: Option<TdmaTime>,
     pub endpoint_id: EndpointId,
     pub new_endpoint_id: Option<EndpointId>,
     pub css_endpoint_id: Option<EndpointId>,

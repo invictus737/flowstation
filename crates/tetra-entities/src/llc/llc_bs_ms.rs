@@ -507,8 +507,10 @@ impl Llc {
             return;
         }
 
-        // If ns is present, we need to send an ACK
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        // If ns is present, we need to send an ACK.
+        // Prefer the real RX time propagated by UMAC; local tick fallback can
+        // be one or more slots late when router queues carry a burst.
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
         if let Some(ns) = ns {
             // Send ACK
             self.schedule_outgoing_ack(msg_dltime, prim.main_address, ns);
