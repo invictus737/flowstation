@@ -1,4 +1,6 @@
-use tetra_core::{BitBuffer, Direction, PhyBlockNum, PhysicalChannel, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log};
+use tetra_core::{
+    BitBuffer, Direction, PhyBlockNum, PhysicalChannel, SsiType, TdmaTime, TetraAddress, Todo, TxReporter, unimplemented_log,
+};
 use tetra_saps::{
     control::call_control::{Circuit, CircuitDlMediaSource},
     tmv::{TmvUnitdataReq, TmvUnitdataReqSlot, enums::logical_chans::LogicalChannel},
@@ -497,6 +499,12 @@ impl BsChannelScheduler {
         }
     }
 
+    fn remember_pending_ra_ack(pending: &mut Vec<u32>, ssi: u32) {
+        if !pending.contains(&ssi) {
+            pending.push(ssi);
+        }
+    }
+
     /// Enqueue a pre-built STCH block for FACCH/stealing on a traffic timeslot.
     /// The block must be 124 type1 bits containing MAC-U-SIGNAL header + TM-SDU.
     pub fn dl_enqueue_stealing(&mut self, ts: u8, block: BitBuffer, tx_reporter: Option<TxReporter>) {
@@ -700,7 +708,9 @@ impl BsChannelScheduler {
     /// while keeping stealing blocks that may still need to be transmitted via FACCH.
     /// Discarded elements are reported as such via tx_reporter if available. Returns true if elements were discarded.
     pub fn dl_drop_all_except_stolen(&mut self, timeslot: u8) -> bool {
-        let queue = &mut self.dltx_queues[timeslot as usize - 1];
+        let timeslot_idx = timeslot as usize - 1;
+        let queue = &mut self.dltx_queues[timeslot_idx];
+        let pending_ra_acks = &mut self.pending_ra_acks[timeslot_idx];
         let mut i = 0;
         let mut item_was_discarded = false;
         while i < queue.len() {
@@ -714,7 +724,17 @@ impl BsChannelScheduler {
                 tracing::warn!("dl_drop_all_except_stolen: discarding scheduled {:?} on ts {}", elem, timeslot);
 
                 match elem {
-                    DlSchedElem::Resource(_, _, tx_reporter) => {
+                    DlSchedElem::Resource(pdu, _, tx_reporter) => {
+                        if pdu.random_access_flag
+                            && let Some(addr) = pdu.addr
+                            && addr.ssi_type == SsiType::Issi
+                        {
+                            // A raw RandomAccessAck can already have been integrated into a
+                            // MAC-RESOURCE before FACCH steals the slot. Preserve that ACK so
+                            // the next STCH for this MS still carries random_access_flag=true.
+                            Self::remember_pending_ra_ack(pending_ra_acks, addr.ssi);
+                        }
+
                         // Report as discarded manually
                         if let Some(tx_reporter) = tx_reporter {
                             tx_reporter.mark_discarded();
@@ -728,7 +748,7 @@ impl BsChannelScheduler {
                     DlSchedElem::RandomAccessAck(addr) => {
                         // Save the SSI so the next STCH for this address can carry
                         // random_access_flag=true (ETSI 21.4.3.1)
-                        self.pending_ra_acks[timeslot as usize - 1].push(addr.ssi);
+                        Self::remember_pending_ra_ack(pending_ra_acks, addr.ssi);
                     }
 
                     DlSchedElem::Grant(..) | DlSchedElem::Broadcast(_) => {
@@ -1639,5 +1659,23 @@ mod tests {
         sched.dump_dl_queue();
 
         assert!(sched.dltx_queues[ts.t as usize - 1].len() == 1);
+    }
+
+    #[test]
+    fn test_dropped_integrated_random_access_ack_is_preserved_for_stch() {
+        let mut sched = get_testing_slotter();
+        let ts = 3;
+        let addr = TetraAddress {
+            ssi_type: SsiType::Issi,
+            ssi: 2260618,
+        };
+        let mut pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, true);
+        pdu.random_access_flag = true;
+
+        sched.dltx_queues[ts as usize - 1].push(DlSchedElem::Resource(pdu, BitBuffer::new(0), None));
+
+        assert!(sched.dl_drop_all_except_stolen(ts));
+        assert!(sched.take_pending_ra_ack(ts, addr.ssi));
+        assert!(!sched.take_pending_ra_ack(ts, addr.ssi));
     }
 }
