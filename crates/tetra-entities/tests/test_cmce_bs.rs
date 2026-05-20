@@ -11,6 +11,7 @@ use tetra_pdus::cmce::fields::basic_service_information::BasicServiceInformation
 use tetra_pdus::cmce::pdus::d_setup::DSetup;
 use tetra_pdus::cmce::pdus::d_tx_granted::DTxGranted;
 use tetra_pdus::cmce::pdus::u_facility::UFacility;
+use tetra_pdus::cmce::pdus::u_release::URelease;
 use tetra_pdus::cmce::pdus::u_setup::USetup;
 use tetra_pdus::cmce::pdus::u_tx_ceased::UTxCeased;
 use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
@@ -229,6 +230,43 @@ fn build_u_tx_ceased_msg(calling_issi: u32, call_id: u16) -> SapMsg {
             chan_change_handle: None,
         }),
     }
+}
+
+fn build_u_release_msg(calling_issi: u32, call_id: u16) -> SapMsg {
+    let mut sdu = BitBuffer::new_autoexpand(24);
+    URelease {
+        call_identifier: call_id,
+        disconnect_cause: tetra_pdus::cmce::enums::disconnect_cause::DisconnectCause::UserRequestedDisconnection,
+        facility: None,
+        proprietary: None,
+    }
+    .to_bitbuf(&mut sdu)
+    .expect("Failed to serialize URelease");
+    sdu.seek(0);
+
+    SapMsg {
+        sap: Sap::LcmcSap,
+        src: TetraEntity::Mle,
+        dest: TetraEntity::Cmce,
+        msg: SapMsgInner::LcmcMleUnitdataInd(LcmcMleUnitdataInd {
+            sdu,
+            handle: 1,
+            endpoint_id: 1,
+            link_id: 1,
+            received_tetra_address: TetraAddress::new(calling_issi, SsiType::Issi),
+            chan_change_resp_req: false,
+            chan_change_handle: None,
+        }),
+    }
+}
+
+fn has_group_floor_released(msgs: &[SapMsg], call_id: u16) -> bool {
+    msgs.iter().any(|msg| {
+        matches!(
+            &msg.msg,
+            SapMsgInner::CmceCallControl(CallControl::FloorReleased { call_id: id, .. }) if *id == call_id
+        )
+    })
 }
 
 #[test]
@@ -521,5 +559,52 @@ fn test_hangtime_late_entry_dsetup_does_not_advertise_not_granted() {
     assert!(
         late_entry_setups.iter().all(|setup| !setup.transmission_request_permission),
         "hangtime late-entry D-SETUP must allow transmission requests"
+    );
+}
+
+#[test]
+fn test_group_call_rejects_unauthorized_release_and_non_speaker_tx_ceased() {
+    debug::setup_logging_verbose();
+
+    const OTHER_ISSI: u32 = 1_000_002;
+    let dltime = TdmaTime { h: 0, m: 1, f: 1, t: 1 };
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(
+        vec![TetraEntity::Cmce],
+        vec![TetraEntity::Mle, TetraEntity::Umac, TetraEntity::Brew],
+    );
+
+    register_subscriber(&mut test, TEST_ISSI, TEST_GSSI);
+    test.submit_message(build_u_setup_msg(TEST_ISSI, TEST_GSSI));
+    test.run_stack(Some(4));
+
+    let initial_msgs = test.dump_sinks();
+    let call_id = parsed_d_setups(&initial_msgs)
+        .first()
+        .map(|setup| setup.call_identifier)
+        .expect("expected initial D-SETUP");
+
+    test.submit_message(build_u_tx_ceased_msg(OTHER_ISSI, call_id));
+    test.run_stack(Some(4));
+    let non_speaker_msgs = test.dump_sinks();
+    assert!(
+        !has_group_floor_released(&non_speaker_msgs, call_id),
+        "non-current speaker U-TX-CEASED must not release the group floor"
+    );
+
+    test.submit_message(build_u_release_msg(OTHER_ISSI, call_id));
+    test.run_stack(Some(4));
+    let unauthorized_release_msgs = test.dump_sinks();
+    assert!(
+        !has_group_floor_released(&unauthorized_release_msgs, call_id),
+        "unauthorized U-RELEASE must not close the active group call"
+    );
+
+    test.submit_message(build_u_tx_ceased_msg(TEST_ISSI, call_id));
+    test.run_stack(Some(4));
+    let owner_ceased_msgs = test.dump_sinks();
+    assert!(
+        has_group_floor_released(&owner_ceased_msgs, call_id),
+        "current speaker U-TX-CEASED should still release the floor"
     );
 }

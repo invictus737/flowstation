@@ -49,6 +49,9 @@ pub struct TmvUnitdataInd {
 
     /// Received signal strength in dBFS. Propagated from PHY via TpUnitdataInd.
     pub rssi_dbfs: f32,
+
+    /// RF-derived UL TDMA time for this received block, when available.
+    pub time: Option<TdmaTime>,
 }
 
 /// Clause 23.2.1

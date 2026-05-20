@@ -1,7 +1,9 @@
-use tetra_core::{BitBuffer, BurstType, PhyBlockNum, PhyBlockType, TrainingSequence};
+use tetra_core::{BitBuffer, BurstType, PhyBlockNum, PhyBlockType, TdmaTime, TrainingSequence};
 
 #[derive(Debug, Clone)]
 pub struct TpUnitdataInd {
+    /// RF-derived uplink TDMA time for this received block, when available.
+    pub time: Option<TdmaTime>,
     pub train_type: TrainingSequence,
     pub burst_type: BurstType,
     pub block_type: PhyBlockType,

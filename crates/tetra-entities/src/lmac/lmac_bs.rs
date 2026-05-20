@@ -211,7 +211,7 @@ impl LmacBs {
         queue.push_back(msg);
     }
 
-    fn rx_blk_control(&mut self, queue: &mut MessageQueue, blk: TpUnitdataInd, lchan: LogicalChannel) {
+    fn rx_blk_control(&mut self, queue: &mut MessageQueue, blk: TpUnitdataInd, lchan: LogicalChannel, ul_time: TdmaTime) {
         if !lchan.is_control_channel() {
             tracing::warn!("LMAC: rx_blk_control called with non-signalling channel {:?}, ignoring", lchan);
             return;
@@ -247,13 +247,14 @@ impl LmacBs {
                 crc_pass,
                 scrambling_code: self.scrambling_code,
                 rssi_dbfs,
+                time: Some(ul_time),
             }),
         };
 
         // Suppose we've just parsed blk1 in a stolen traffic burst.
         // We then don't know whether blk2 is also stolen, as that will be shown by the Umac
         // We thus push this with prio, and the umac will signal with prio if blk2 is stolen too
-        queue.push_prio(m, MessagePrio::Immediate);
+        queue.push_prio(m, MessagePrio::Critical);
     }
 
     fn rx_tp_prim(&mut self, queue: &mut MessageQueue, message: SapMsg) {
@@ -264,7 +265,21 @@ impl LmacBs {
             return;
         };
 
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        let fallback_ul_time = self.dltime.add_timeslots(-2);
+        let msg_dltime = prim.time.unwrap_or(fallback_ul_time);
+        if prim.time.is_none() {
+            tracing::debug!("lmac_bs: TpUnitdataInd without RF time, using stack-derived {}", fallback_ul_time);
+        } else if msg_dltime != fallback_ul_time {
+            tracing::warn!(
+                "lmac_bs: RF-derived UL time {} differs from stack-derived {}; using RF time",
+                msg_dltime,
+                fallback_ul_time
+            );
+        }
+        if !(1..=4).contains(&msg_dltime.t) {
+            tracing::warn!("lmac_bs: invalid UL timeslot {} for {}", msg_dltime.t, msg_dltime);
+            return;
+        }
         let ts_idx = msg_dltime.t as usize - 1;
         let pchan = self.uplink_phy_chan[ts_idx];
         let lchan = Self::determine_logical_channel_ul(&prim, pchan == PhysicalChannel::Tp, self.blk2_stolen);
@@ -289,7 +304,7 @@ impl LmacBs {
                 self.rx_blk_traffic(queue, prim, lchan, msg_dltime)
             }
             LogicalChannel::SchF | LogicalChannel::SchHu | LogicalChannel::Stch => {
-                self.rx_blk_control(queue, prim, lchan);
+                self.rx_blk_control(queue, prim, lchan, msg_dltime);
             }
             _ => {
                 tracing::error!("BUG: unexpected message or state -- routing error");

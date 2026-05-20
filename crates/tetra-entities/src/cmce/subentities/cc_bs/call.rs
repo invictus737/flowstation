@@ -61,6 +61,12 @@ pub(super) enum GroupCallState {
     NoActiveSpeaker { since: TdmaTime },
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct QueuedTxDemand {
+    pub(super) requester: TetraAddress,
+    pub(super) priority: u8,
+}
+
 /// Tracks an active group call (local or network-initiated)
 #[derive(Clone)]
 pub(super) struct ActiveCall {
@@ -73,7 +79,7 @@ pub(super) struct ActiveCall {
     pub(super) usage: u8,
     pub(super) tx_active: bool,
     pub(super) hangtime_start: Option<TdmaTime>,
-    pub(super) queued_tx_demand: Option<TetraAddress>,
+    pub(super) queued_tx_demand: Option<QueuedTxDemand>,
     pub(super) brew_uuid: Option<uuid::Uuid>,
 }
 
@@ -148,6 +154,11 @@ impl ActiveCall {
     }
 
     #[inline]
+    pub(super) fn is_release_authorized(&self, issi: u32) -> bool {
+        matches!(&self.origin, CallOrigin::Local { caller_addr } if caller_addr.ssi == issi) || self.is_current_speaker(issi)
+    }
+
+    #[inline]
     pub(super) fn call_timeout_expired(&self, now: TdmaTime) -> bool {
         match call_timeout_to_timeslots(self.call_timeout) {
             Some(timeout) => self.created_at.age(now) > timeout,
@@ -179,30 +190,36 @@ impl ActiveCall {
         }
     }
 
-    pub(super) fn queue_tx_demand(&mut self, requester: TetraAddress) -> TxDemandQueueResult {
+    pub(super) fn queue_tx_demand(&mut self, requester: TetraAddress, priority: u8) -> TxDemandQueueResult {
         if self.is_current_speaker(requester.ssi) {
             return TxDemandQueueResult::FromCurrentSpeaker;
         }
 
         match self.queued_tx_demand {
-            Some(existing) if existing.ssi == requester.ssi => TxDemandQueueResult::AlreadyQueuedBySameUser,
+            Some(existing) if existing.requester.ssi == requester.ssi => TxDemandQueueResult::AlreadyQueuedBySameUser,
+            Some(existing) if priority > existing.priority => {
+                let replaced = existing.requester;
+                self.queued_tx_demand = Some(QueuedTxDemand { requester, priority });
+                TxDemandQueueResult::ReplacedLowerPriority(replaced)
+            }
             Some(_) => TxDemandQueueResult::QueueBusy,
             None => {
-                self.queued_tx_demand = Some(requester);
+                self.queued_tx_demand = Some(QueuedTxDemand { requester, priority });
                 TxDemandQueueResult::Queued
             }
         }
     }
 
     pub(super) fn take_queued_tx_demand(&mut self) -> Option<TetraAddress> {
-        self.queued_tx_demand.take()
+        self.queued_tx_demand.take().map(|queued| queued.requester)
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum TxDemandQueueResult {
     Queued,
     AlreadyQueuedBySameUser,
+    ReplacedLowerPriority(TetraAddress),
     QueueBusy,
     FromCurrentSpeaker,
 }
@@ -246,6 +263,8 @@ pub(super) struct IndividualCall {
     pub(super) active_timer_started: Option<TdmaTime>,
     /// Active call timeout value.
     pub(super) call_timeout: CallTimeout,
+    /// CMCE call priority from setup. U-TX-DEMAND is 2-bit priority, so comparisons saturate this to 3.
+    pub(super) call_priority: u8,
     /// True when the called party lives behind Brew/TetraPack.
     pub(super) called_over_brew: bool,
     /// True when the calling party lives behind Brew/TetraPack.
@@ -262,6 +281,43 @@ pub(super) struct IndividualCall {
 }
 
 impl IndividualCall {
+    #[inline]
+    pub(super) fn is_participant(&self, issi: u32) -> bool {
+        self.calling_addr.ssi == issi || self.called_addr.ssi == issi
+    }
+
+    #[inline]
+    pub(super) fn is_local_participant(&self, issi: u32) -> bool {
+        (self.calling_addr.ssi == issi && !self.calling_over_brew) || (self.called_addr.ssi == issi && !self.called_over_brew)
+    }
+
+    #[inline]
+    pub(super) fn peer_addr_for(&self, issi: u32) -> Option<TetraAddress> {
+        if self.calling_addr.ssi == issi {
+            Some(self.called_addr)
+        } else if self.called_addr.ssi == issi {
+            Some(self.calling_addr)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub(super) fn leg_for(&self, issi: u32) -> Option<(TetraAddress, u8, u8)> {
+        if self.calling_addr.ssi == issi {
+            Some((self.calling_addr, self.calling_ts, self.calling_usage))
+        } else if self.called_addr.ssi == issi {
+            Some((self.called_addr, self.called_ts, self.called_usage))
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    pub(super) fn tx_demand_priority_allowed(&self, priority: u8) -> bool {
+        priority >= self.call_priority.min(3)
+    }
+
     #[inline]
     pub(super) fn is_alerted(&self) -> bool {
         matches!(
@@ -286,12 +342,13 @@ impl IndividualCall {
         self.state == IndividualCallState::Active
     }
 
-    pub(super) fn activate(&mut self, now: TdmaTime) {
+    pub(super) fn activate(&mut self, now: TdmaTime, initial_floor_holder: Option<u32>) {
         self.state = IndividualCallState::Active;
         self.setup_timer_started = None;
         self.setup_timeout = None;
         self.active_timer_started = Some(now);
         self.connect_request_sent = false;
+        self.floor_holder = if self.simplex_duplex { None } else { initial_floor_holder };
     }
 
     #[inline]

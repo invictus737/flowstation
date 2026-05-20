@@ -114,6 +114,7 @@ impl CcBsSubentity {
         queue: &mut MessageQueue,
         call_id: u16,
         requesting_party: TetraAddress,
+        priority: u8,
     ) -> Result<(), GroupTransitionError> {
         let Some(call) = self.active_calls.get_mut(&call_id) else {
             return Err(GroupTransitionError::UnknownCall(call_id));
@@ -130,7 +131,7 @@ impl CcBsSubentity {
             call.grant_floor(requesting_party.ssi, Some(requesting_party));
             None
         } else {
-            Some(call.queue_tx_demand(requesting_party))
+            Some(call.queue_tx_demand(requesting_party, priority))
         };
         if grant_now {
             self.tpi_update_talker(call_id, requesting_party.ssi);
@@ -150,7 +151,9 @@ impl CcBsSubentity {
                         requesting_party.ssi
                     );
                 }
-                TxDemandQueueResult::Queued | TxDemandQueueResult::AlreadyQueuedBySameUser => {
+                TxDemandQueueResult::Queued
+                | TxDemandQueueResult::AlreadyQueuedBySameUser
+                | TxDemandQueueResult::ReplacedLowerPriority(_) => {
                     // Non-pre-emptive: keep current speaker active, queue requester.
                     self.fsm_send_d_tx_granted_individual(
                         queue,

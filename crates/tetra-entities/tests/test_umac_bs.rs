@@ -153,6 +153,7 @@ fn test_first_issi_downlink_after_recent_mac_access_carries_random_access_flag()
             crc_pass: true,
             scrambling_code: 864282631,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     });
     test.run_stack(Some(4));
@@ -189,6 +190,7 @@ fn test_stale_mac_access_does_not_mark_late_issi_downlink_as_random_access() {
             crc_pass: true,
             scrambling_code: 864282631,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     });
     test.run_stack(Some(4));
@@ -222,6 +224,7 @@ fn test_in_fragmented_sch_hu_and_sch_f() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: None,
     };
     let test_sapmsg1 = SapMsg {
         sap: Sap::TmvSap,
@@ -236,6 +239,7 @@ fn test_in_fragmented_sch_hu_and_sch_f() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: None,
     };
     let test_sapmsg2 = SapMsg {
         sap: Sap::TmvSap,
@@ -286,6 +290,7 @@ fn test_in_fragmented_sch_hu_and_sch_hu() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: None,
     };
     let test_sapmsg1 = SapMsg {
         sap: Sap::TmvSap,
@@ -300,6 +305,7 @@ fn test_in_fragmented_sch_hu_and_sch_hu() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: None,
     };
     let test_sapmsg2 = SapMsg {
         sap: Sap::TmvSap,

@@ -89,6 +89,7 @@ impl LmacMs {
                 crc_pass: true,
                 scrambling_code,
                 rssi_dbfs: 0.0, // DL burst, RSSI not used in BS mode
+                time: None,
             }),
         };
 
@@ -189,6 +190,7 @@ impl LmacMs {
                     crc_pass,
                     scrambling_code: scramb_code,
                     rssi_dbfs: 0.0, // DL burst, RSSI not used in BS mode
+                    time: None,
                 }),
             };
             queue.push_back(m);

@@ -202,6 +202,7 @@ impl CcBsSubentity {
                 setup_timeout: Some(CallTimeoutSetupPhase::T60s),
                 active_timer_started: None,
                 call_timeout,
+                call_priority: call.priority,
                 called_over_brew: false,
                 calling_over_brew: true,
                 brew_uuid: Some(brew_uuid),

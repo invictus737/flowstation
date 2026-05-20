@@ -468,6 +468,7 @@ mod tests {
             block_num: PhyBlockNum::Block2,
             block: type5,
             rssi_dbfs: 0.0,
+            time: None,
         };
 
         let (type1, crc_ok) = decode_cp(lchan, prim_ind, Some(scramb_code));
@@ -498,6 +499,7 @@ mod tests {
             block_num: PhyBlockNum::Block2,
             block: type5,
             rssi_dbfs: 0.0,
+            time: None,
         };
 
         let (type1, crc_ok) = decode_cp(lchan, prim_ind, Some(scramb_code));
@@ -572,6 +574,7 @@ mod tests {
             block_num: PhyBlockNum::Both,
             block: type5,
             rssi_dbfs: 0.0,
+            time: None,
         };
 
         let (type1, crc_ok) = decode_cp(lchan, prim_ind, Some(scramb_code));

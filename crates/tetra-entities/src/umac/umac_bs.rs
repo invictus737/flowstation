@@ -528,7 +528,7 @@ impl UmacBs {
         }
 
         // Handle reservation if present
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
         if let Some(res_req) = &pdu.reservation_req {
             let grant = self.channel_scheduler.ul_process_cap_req(msg_dltime.t, addr, res_req);
             if let Some(grant) = grant {
@@ -669,8 +669,7 @@ impl UmacBs {
         }
 
         // Schedule acknowledgement of this message
-        // let ul_time = message.dltime.add_timeslots(-2);
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
         self.channel_scheduler.dl_enqueue_random_access_ack(msg_dltime.t, addr);
         if addr.ssi_type == SsiType::Issi {
             self.recent_random_access.insert(addr.ssi, msg_dltime);
@@ -798,7 +797,7 @@ impl UmacBs {
         tracing::debug!("rx_mac_frag_ul: pdu_len_bits: {} fill_bits: {}", pdu_len_bits, num_fill_bits);
 
         // Get slot owner from schedule
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
         let Some(slot_owner) = self.channel_scheduler.ul_get_slot_owner(msg_dltime, prim.block_num) else {
             tracing::warn!("rx_mac_frag_ul: Received MAC-FRAG-UL for unassigned block {:?}", prim.block_num);
             self.channel_scheduler.dump_ul_schedule_full(true);
@@ -866,7 +865,7 @@ impl UmacBs {
         );
 
         // Get slot owner from schedule, decrypt if needed
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
         let Some(slot_owner) = self.channel_scheduler.ul_get_slot_owner(msg_dltime, prim.block_num) else {
             // Common with scan-list terminals that transmit on UL without waiting for a grant
             tracing::debug!("rx_mac_end_ul: Received MAC-END-UL for unassigned block {:?}", prim.block_num);
@@ -984,7 +983,7 @@ impl UmacBs {
         );
 
         // Get slot owner from schedule, decrypt if needed
-        let msg_dltime = self.dltime.add_timeslots(-2); // Msg on uplink was sent two timeslots ago. 
+        let msg_dltime = prim.time.unwrap_or_else(|| self.dltime.add_timeslots(-2));
         let Some(slot_owner) = self.channel_scheduler.ul_get_slot_owner(msg_dltime, prim.block_num) else {
             tracing::warn!("rx_mac_end_hu: Received MAC-END-HU for unassigned block {:?}", prim.block_num);
             self.channel_scheduler.dump_ul_schedule_full(true);
@@ -1416,7 +1415,7 @@ impl UmacBs {
                 ..Default::default()
             }),
         };
-        queue.push_prio(m, MessagePrio::Immediate);
+        queue.push_prio(m, MessagePrio::Critical);
     }
 
     // fn rx_stch_second_half(&mut self, queue: &mut MessageQueue, message: &mut SapMsg, pending: PendingStch) {
@@ -1480,6 +1479,24 @@ impl UmacBs {
         let ts = circuit.ts;
         let dir = circuit.direction;
 
+        if !(2..=4).contains(&ts) {
+            tracing::warn!(
+                "rx_control_circuit_open: refusing traffic circuit Open on invalid/reserved ts {}",
+                ts
+            );
+            return;
+        }
+        if let Some(peer_ts) = circuit.peer_ts
+            && !(2..=4).contains(&peer_ts)
+        {
+            tracing::warn!(
+                "rx_control_circuit_open: refusing traffic circuit Open with invalid/reserved peer_ts {} for ts {}",
+                peer_ts,
+                ts
+            );
+            return;
+        }
+
         // Direction::Both needs to be split into separate DL and UL operations
         // because the UMAC circuit manager tracks them independently.
         let dirs: Vec<Direction> = match dir {
@@ -1524,6 +1541,10 @@ impl UmacBs {
             tracing::error!("BUG: unexpected message or state -- routing error");
             return;
         };
+        if !(1..=4).contains(&ts) {
+            tracing::warn!("rx_control_circuit_close: ignoring invalid ts {}", ts);
+            return;
+        }
 
         // Direction::Both needs to be split into separate DL and UL close operations
         let dirs: Vec<Direction> = match dir {
@@ -1742,7 +1763,7 @@ impl TetraEntityTrait for UmacBs {
             msg: SapMsgInner::TmvUnitdataReq(elem),
         };
         tracing::trace!("UmacBs tick: Pushing finalized timeslot to LMAC: {:?}", s);
-        queue.push_back(s);
+        queue.push_prio(s, MessagePrio::Immediate);
     }
 }
 

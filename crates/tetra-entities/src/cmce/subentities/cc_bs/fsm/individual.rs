@@ -210,8 +210,16 @@ impl CcBsSubentity {
 
         Self::validate_individual_transition(call_id, call_snapshot.state, IndividualEvent::Connect)?;
 
+        let initial_floor_holder = if call_snapshot.simplex_duplex {
+            None
+        } else if call_snapshot.called_over_brew {
+            Some(call_snapshot.called_addr.ssi)
+        } else {
+            Some(call_snapshot.called_addr.ssi)
+        };
+
         if let Some(call) = self.individual_calls.get_mut(&call_id) {
-            call.activate(self.dltime);
+            call.activate(self.dltime, initial_floor_holder);
         }
         Ok(())
     }
