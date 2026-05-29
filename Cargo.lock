@@ -155,23 +155,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bluestation-bs"
-version = "0.1.2-mod"
-dependencies = [
- "clap",
- "crossbeam-channel",
- "ctrlc",
- "rustls",
- "tetra-config",
- "tetra-core",
- "tetra-entities",
- "tetra-saps",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
-
-[[package]]
 name = "bumpalo"
 version = "3.20.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -844,6 +827,23 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "librestation-bs"
+version = "0.1.7-mod-stability"
+dependencies = [
+ "clap",
+ "crossbeam-channel",
+ "ctrlc",
+ "rustls",
+ "tetra-config",
+ "tetra-core",
+ "tetra-entities",
+ "tetra-saps",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
 
 [[package]]
 name = "litemap"
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "tetra-config"
-version = "0.1.2-mod"
+version = "0.1.7-mod-stability"
 dependencies = [
  "chrono-tz",
  "serde",
@@ -1673,7 +1673,7 @@ dependencies = [
 
 [[package]]
 name = "tetra-core"
-version = "0.1.2-mod"
+version = "0.1.7-mod-stability"
 dependencies = [
  "bitcode",
  "chrono",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "tetra-entities"
-version = "0.1.2-mod"
+version = "0.1.7-mod-stability"
 dependencies = [
  "as-any",
  "base64",
@@ -1713,6 +1713,7 @@ dependencies = [
  "tetra-pdus",
  "tetra-saps",
  "tokio",
+ "toml",
  "tracing",
  "tungstenite",
  "ureq",
@@ -1721,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "tetra-pdus"
-version = "0.1.2-mod"
+version = "0.1.7-mod-stability"
 dependencies = [
  "tetra-config",
  "tetra-core",
@@ -1731,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "tetra-saps"
-version = "0.1.2-mod"
+version = "0.1.7-mod-stability"
 dependencies = [
  "tetra-core",
  "tracing",

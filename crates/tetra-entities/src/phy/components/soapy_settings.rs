@@ -6,6 +6,7 @@ use tetra_config::bluestation::{StackMode, sec_phy_soapy::*};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SupportedDevice {
     LimeSdr(LimeSdrModel),
+    LibreStation,
     SXceiver,
     PlutoSdr,
     Usrp(UsrpModel),
@@ -42,6 +43,8 @@ impl SupportedDevice {
             ("FT601", _) => Some(Self::LimeSdr(LimeSdrModel::OtherFt601)),
 
             ("sx", _) => Some(Self::SXceiver),
+
+            ("librestation", _) | ("LibreStation", _) => Some(Self::LibreStation),
 
             ("PlutoSDR", _) => Some(Self::PlutoSdr),
 
@@ -148,6 +151,8 @@ impl SdrSettings {
     fn get_defaults(cfg: &CfgSoapySdr, device: SupportedDevice, mode: StackMode) -> Self {
         match device {
             SupportedDevice::LimeSdr(model) => Self::settings_limesdr(mode, model),
+
+            SupportedDevice::LibreStation => Self::settings_librestation(mode),
 
             SupportedDevice::SXceiver => Self::settings_sxceiver(mode, cfg.fs),
 
@@ -258,6 +263,22 @@ impl SdrSettings {
         }
     }
 
+    fn settings_librestation(mode: StackMode) -> Self {
+        Self {
+            name: "LibreStation".to_string(),
+            use_get_hardware_time: false,
+            fs: 72e3,
+            rx_ant: Some("A_BALANCED".to_string()),
+            tx_ant: Some("A".to_string()),
+            rx_gain: vec![("PGA".to_string(), 20.0)],
+            tx_gain: vec![("PGA".to_string(), 89.0)],
+            rx_args: vec![],
+            tx_args: vec![],
+            dev_args: vec![],
+            ..Self::default(mode)
+        }
+    }
+
     fn settings_usrp(mode: StackMode, model: UsrpModel) -> Self {
         Self {
             name: match model {
@@ -295,7 +316,8 @@ impl SdrSettings {
 
             dev_args: vec![
                 ("direct".to_string(), "1".to_string()),
-                ("timestamp_every".to_string(), "1500".to_string()),
+                // Leave timestamp interval to the SoapyPluto driver/firmware default.
+                // ("timestamp_every".to_string(), "1500".to_string()),
                 ("loopback".to_string(), "0".to_string()),
             ],
 

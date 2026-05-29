@@ -46,6 +46,11 @@ impl Modulator {
         }
     }
 
+    pub fn align_reference_time(&mut self, slot_time: TdmaTime, slot_begin_sample: SampleCount) {
+        self.reference_time =
+            slot_begin_sample + CHANNEL_FILTER_TAPS.len() as SampleCount - TdmaTime::to_int(slot_time) as SampleCount * SAMPLES_SLOT;
+    }
+
     /// Produce one output sample.
     pub fn sample(&mut self, sample_counter: SampleCount, tx_slot: &TxSlotBits) -> Result<ComplexSample, Error> {
         // Compensate for delay of pulse shaping filter in sample count

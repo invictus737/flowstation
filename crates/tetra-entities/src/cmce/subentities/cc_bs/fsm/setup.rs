@@ -9,9 +9,37 @@ impl CcBsSubentity {
         pdu: &USetup,
         calling_party: TetraAddress,
     ) {
+        let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
+            tracing::error!("BUG: unexpected message or state -- routing error");
+            return;
+        };
+
+        if pdu.called_party_type_identifier != tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Ssi
+            || pdu.called_party_short_number_address.is_some()
+            || pdu.called_party_extension.is_some()
+            || pdu.external_subscriber_number.is_some()
+        {
+            tracing::warn!(
+                "U-SETUP group with unsupported called party fields type={} short={:?} extension={:?} external={}",
+                pdu.called_party_type_identifier,
+                pdu.called_party_short_number_address,
+                pdu.called_party_extension,
+                pdu.external_subscriber_number.is_some()
+            );
+            let reject_call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(reject_call_id, DisconnectCause::IncompatibleTrafficCase);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
+            return;
+        }
+
         // Get destination GSSI (called party)
         let Some(dest_gssi) = pdu.called_party_ssi else {
-            tracing::warn!("U-SETUP without called_party_ssi, ignoring");
+            tracing::warn!("U-SETUP group without called_party_ssi, rejecting");
+            let reject_call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(reject_call_id, DisconnectCause::CalledPartyNotReachable);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
             return;
         };
         let dest_gssi = dest_gssi as u32;
@@ -23,6 +51,30 @@ impl CcBsSubentity {
                 calling_party.ssi,
                 dest_gssi
             );
+            let reject_call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(reject_call_id, DisconnectCause::CalledPartyNotReachable);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
+            return;
+        }
+
+        if let Some((active_call_id, state)) = self
+            .active_calls
+            .iter()
+            .find(|(_, call)| call.dest_gssi == dest_gssi)
+            .map(|(id, call)| (*id, call.state()))
+        {
+            tracing::info!(
+                "CMCE: rejecting U-SETUP from issi={} to gssi={} (existing call_id={} state={:?})",
+                calling_party.ssi,
+                dest_gssi,
+                active_call_id,
+                state
+            );
+            let reject_call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(reject_call_id, DisconnectCause::CalledPartyBusy);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
             return;
         }
 
@@ -40,6 +92,10 @@ impl CcBsSubentity {
             Ok(circuit) => circuit.clone(),
             Err(e) => {
                 tracing::error!("Failed to allocate circuit for U-SETUP: {:?}", e);
+                let reject_call_id = self.circuits.get_next_call_id();
+                let sdu = Self::build_d_release(reject_call_id, DisconnectCause::CongestionInInfrastructure);
+                let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+                queue.push_back(msg);
                 return;
             }
         };
@@ -68,10 +124,6 @@ impl CcBsSubentity {
         timeslots[circuit.ts as usize - 1] = true;
 
         // Extract UL message routing info for individually-addressed responses.
-        let SapMsgInner::LcmcMleUnitdataInd(prim) = &message.msg else {
-            tracing::error!("BUG: unexpected message or state -- routing error");
-            return;
-        };
         let ul_handle = prim.handle;
         let ul_link_id = prim.link_id;
         let ul_endpoint_id = prim.endpoint_id;
@@ -227,11 +279,27 @@ impl CcBsSubentity {
 
         let is_issi_address = pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Ssi
             || pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi;
-        if !is_issi_address && !net_brew::is_active(&self.config) {
+        let is_short_number_address =
+            pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Sna;
+        if pdu.called_party_type_identifier == tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Reserved
+            || (!is_issi_address && !is_short_number_address)
+        {
             tracing::warn!(
-                "U-SETUP P2P with non-ISSI called_party_type_identifier={} (rejecting, Brew disabled)",
+                "U-SETUP P2P with unsupported called_party_type_identifier={} (rejecting)",
                 pdu.called_party_type_identifier
             );
+            let call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(call_id, DisconnectCause::RequestedServiceNotAvailable);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
+            return;
+        }
+        if is_short_number_address && pdu.called_party_short_number_address.is_none() {
+            tracing::warn!("U-SETUP P2P with SNA type but missing short number, rejecting");
+            let call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(call_id, DisconnectCause::IncompatibleTrafficCase);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
             return;
         }
         if is_issi_address
@@ -240,6 +308,10 @@ impl CcBsSubentity {
                     && pdu.called_party_type_identifier != tetra_pdus::cmce::enums::party_type_identifier::PartyTypeIdentifier::Tsi))
         {
             tracing::warn!("U-SETUP P2P with invalid called party fields (short number/extension mismatch), rejecting");
+            let call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(call_id, DisconnectCause::IncompatibleTrafficCase);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
             return;
         }
 
@@ -247,10 +319,29 @@ impl CcBsSubentity {
         let has_external_number = pdu.external_subscriber_number.is_some() || pdu.called_party_short_number_address.is_some();
         if called_ssi == 0 && !has_external_number {
             tracing::warn!("U-SETUP P2P without called ISSI/number, ignoring");
+            let call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(call_id, DisconnectCause::CalledPartyNotReachable);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
             return;
         }
 
         let called_addr = TetraAddress::new(called_ssi, SsiType::Issi);
+
+        if let Some((active_call_id, state)) = self.find_individual_call_by_issi(calling_party.ssi) {
+            tracing::info!(
+                "CMCE: rejecting U-SETUP P2P from ISSI {} to ISSI {} (calling party busy in call_id={} state={:?})",
+                calling_party.ssi,
+                called_addr.ssi,
+                active_call_id,
+                state
+            );
+            let reject_call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(reject_call_id, DisconnectCause::CalledPartyBusy);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
+            return;
+        }
 
         // ── Echo service (ISSI 999) ──────────────────────────────────────────
         if called_ssi == crate::cmce::subentities::cc_bs::echo::ECHO_ISSI {
@@ -443,6 +534,7 @@ impl CcBsSubentity {
                 setup_timeout: Some(CallTimeoutSetupPhase::T60s),
                 active_timer_started: None,
                 call_timeout: self.config_call_timeout(),
+                call_priority: pdu.call_priority,
                 called_over_brew: false,
                 calling_over_brew: false,
                 brew_uuid: None,
@@ -480,6 +572,36 @@ impl CcBsSubentity {
             return;
         };
         let mut network_call = Self::build_network_circuit_call_from_u_setup(pdu, calling_party.ssi);
+
+        if let Some((active_call_id, state)) = self.find_individual_call_by_issi(calling_party.ssi) {
+            tracing::info!(
+                "CMCE: rejecting U-SETUP P2P over Brew from ISSI {} (calling party busy in call_id={} state={:?})",
+                calling_party.ssi,
+                active_call_id,
+                state
+            );
+            let call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(call_id, DisconnectCause::CalledPartyBusy);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
+            return;
+        }
+        if called_addr.ssi != 0
+            && let Some((active_call_id, state)) = self.find_individual_call_by_issi(called_addr.ssi)
+        {
+            tracing::info!(
+                "CMCE: rejecting U-SETUP P2P over Brew from ISSI {} to ISSI {} (called party busy in call_id={} state={:?})",
+                calling_party.ssi,
+                called_addr.ssi,
+                active_call_id,
+                state
+            );
+            let call_id = self.circuits.get_next_call_id();
+            let sdu = Self::build_d_release(call_id, DisconnectCause::CalledPartyBusy);
+            let msg = Self::build_sapmsg_direct(sdu, calling_party, prim.handle, prim.link_id, prim.endpoint_id);
+            queue.push_back(msg);
+            return;
+        }
 
         // Short service numbers (< 1_000_000) must be sent to TetraPack
         // with destination=0 and the number as a string.
@@ -624,6 +746,39 @@ impl CcBsSubentity {
 
         self.send_d_call_proceeding(queue, message, pdu, call_id, CallTimeoutSetupPhase::T60s, pdu.hook_method_selection);
 
+        let d_setup = DSetup {
+            call_identifier: call_id,
+            call_time_out: if pdu.simplex_duplex_selection {
+                CallTimeout::Infinite
+            } else {
+                self.config_call_timeout()
+            },
+            hook_method_selection: pdu.hook_method_selection,
+            simplex_duplex_selection: pdu.simplex_duplex_selection,
+            basic_service_information: pdu.basic_service_information.clone(),
+            transmission_grant: TransmissionGrant::NotGranted,
+            transmission_request_permission: false,
+            call_priority: pdu.call_priority,
+            notification_indicator: None,
+            temporary_address: None,
+            calling_party_address_ssi: Some(calling_party.ssi),
+            calling_party_extension: None,
+            external_subscriber_number: None,
+            facility: self.tpi_inform_for_call(call_id),
+            dm_ms_address: None,
+            proprietary: None,
+        };
+        self.cached_setups.insert(
+            call_id,
+            CachedSetup {
+                pdu: d_setup,
+                dest_addr: calling_party,
+                resend: false,
+                last_reporter: None,
+                is_individual: true,
+            },
+        );
+
         queue.push_back(SapMsg {
             sap: Sap::Control,
             src: TetraEntity::Cmce,
@@ -655,6 +810,7 @@ impl CcBsSubentity {
                 setup_timeout: Some(CallTimeoutSetupPhase::T60s),
                 active_timer_started: None,
                 call_timeout: self.config_call_timeout(),
+                call_priority: pdu.call_priority,
                 called_over_brew: true,
                 calling_over_brew: false,
                 brew_uuid: Some(brew_uuid),
@@ -823,12 +979,13 @@ impl CcBsSubentity {
                 setup_timeout: None,
                 active_timer_started: Some(self.dltime),
                 call_timeout: self.config_call_timeout(),
+                call_priority: pdu.call_priority,
                 called_over_brew: false,
                 calling_over_brew: false,
                 brew_uuid: None,
                 network_call: None,
                 connect_request_sent: false,
-                floor_holder: Some(calling_party.ssi),
+                floor_holder: (!pdu.simplex_duplex_selection).then_some(calling_party.ssi),
             },
         );
 

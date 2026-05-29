@@ -203,6 +203,7 @@ impl CcBsSubentity {
     pub(in crate::cmce::subentities::cc_bs) fn fsm_individual_transition_to_active(
         &mut self,
         call_id: u16,
+        initial_floor_holder: Option<u32>,
     ) -> Result<(), IndividualTransitionError> {
         let Some(call_snapshot) = self.individual_calls.get(&call_id).cloned() else {
             return Err(IndividualTransitionError::UnknownCall(call_id));
@@ -211,7 +212,7 @@ impl CcBsSubentity {
         Self::validate_individual_transition(call_id, call_snapshot.state, IndividualEvent::Connect)?;
 
         if let Some(call) = self.individual_calls.get_mut(&call_id) {
-            call.activate(self.dltime);
+            call.activate(self.dltime, initial_floor_holder);
         }
         Ok(())
     }
@@ -318,6 +319,24 @@ impl CcBsSubentity {
                 return;
             };
 
+            if !self.cached_setups.contains_key(&call_id) {
+                tracing::error!(
+                    "CMCE: Brew-originated U-CONNECT call_id={} missing cached setup, releasing fail-closed",
+                    call_id
+                );
+                self.release_individual_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
+                queue.push_back(SapMsg {
+                    sap: Sap::Control,
+                    src: TetraEntity::Cmce,
+                    dest: TetraEntity::Brew,
+                    msg: SapMsgInner::CmceCallControl(CallControl::NetworkCircuitRelease {
+                        brew_uuid,
+                        cause: DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8,
+                    }),
+                });
+                return;
+            }
+
             let mut call_info = call_snapshot.network_call.clone().unwrap_or(NetworkCircuitCall {
                 source_issi: call_snapshot.calling_addr.ssi,
                 destination: call_snapshot.called_addr.ssi,
@@ -398,7 +417,11 @@ impl CcBsSubentity {
         let simplex_duplex = call_snapshot.simplex_duplex;
 
         let Some(cached) = self.cached_setups.get(&call_id) else {
-            tracing::error!("No cached D-SETUP for call_id={}", call_id);
+            tracing::error!(
+                "No cached D-SETUP for individual U-CONNECT call_id={}, releasing fail-closed",
+                call_id
+            );
+            self.release_individual_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
             return;
         };
 
@@ -629,7 +652,8 @@ impl CcBsSubentity {
         };
         queue.push_back(ack_msg2);
 
-        if let Err(err) = self.fsm_individual_transition_to_active(call_id) {
+        let initial_floor_holder = (!simplex_duplex).then_some(called_addr.ssi);
+        if let Err(err) = self.fsm_individual_transition_to_active(call_id, initial_floor_holder) {
             match err {
                 IndividualTransitionError::UnknownCall(_) => {
                     tracing::warn!("U-CONNECT activation failed, unknown call_id={}", call_id);

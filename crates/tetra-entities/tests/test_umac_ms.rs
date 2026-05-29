@@ -30,6 +30,7 @@ fn test_umac_ms() {
             crc_pass: true,
             scrambling_code: 0,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     };
 
@@ -69,6 +70,7 @@ fn test_umac_frag() {
             crc_pass: true,
             scrambling_code: 0,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     };
     test.submit_message(m);
@@ -87,6 +89,7 @@ fn test_umac_frag() {
             crc_pass: true,
             scrambling_code: 0,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     };
 
@@ -126,6 +129,7 @@ fn test_sysinfo() {
             crc_pass: true,
             scrambling_code: 0,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     };
     test.submit_message(m);
@@ -161,6 +165,7 @@ fn test_sync() {
             crc_pass: true,
             scrambling_code: 0,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     };
     test.submit_message(m);
@@ -194,6 +199,7 @@ fn test_resource() {
             crc_pass: true,
             scrambling_code: 0,
             rssi_dbfs: 0.0,
+            time: None,
         }),
     };
     test.submit_message(m);

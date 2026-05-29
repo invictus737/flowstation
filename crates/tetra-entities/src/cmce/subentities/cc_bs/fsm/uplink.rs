@@ -2,6 +2,70 @@ use super::super::dtmf::{DtmfKind, decode_dtmf, pack_type3_bits_to_bytes};
 use super::*;
 
 impl CcBsSubentity {
+    fn send_d_tx_ceased_individual(&self, queue: &mut MessageQueue, call_id: u16, target_addr: TetraAddress, ts: u8, usage: u8) {
+        let ceased_pdu = DTxCeased {
+            call_identifier: call_id,
+            transmission_request_permission: false,
+            notification_indicator: None,
+            facility: None,
+            dm_ms_address: None,
+            proprietary: None,
+        };
+        let mut sdu = BitBuffer::new_autoexpand(30);
+        ceased_pdu.to_bitbuf(&mut sdu).expect("Failed to serialize DTxCeased");
+        sdu.seek(0);
+        let msg = Self::build_sapmsg_stealing_ul_dl(sdu, target_addr, ts, Some(usage), UlDlAssignment::Dl);
+        queue.push_back(msg);
+    }
+
+    fn notify_individual_floor_granted(&self, queue: &mut MessageQueue, call: &IndividualCall, call_id: u16, holder_issi: u32, ts: u8) {
+        queue.push_back(SapMsg {
+            sap: Sap::Control,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Umac,
+            msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                call_id,
+                source_issi: holder_issi,
+                dest_gssi: call.peer_addr_for(holder_issi).map(|addr| addr.ssi).unwrap_or(holder_issi),
+                ts,
+                uplink_expected: true,
+            }),
+        });
+
+        if call.called_over_brew || call.calling_over_brew {
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Brew,
+                msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                    call_id,
+                    source_issi: holder_issi,
+                    dest_gssi: call.peer_addr_for(holder_issi).map(|addr| addr.ssi).unwrap_or(holder_issi),
+                    ts,
+                    uplink_expected: true,
+                }),
+            });
+        }
+    }
+
+    fn notify_individual_floor_released(&self, queue: &mut MessageQueue, call: &IndividualCall, call_id: u16, ts: u8) {
+        queue.push_back(SapMsg {
+            sap: Sap::Control,
+            src: TetraEntity::Cmce,
+            dest: TetraEntity::Umac,
+            msg: SapMsgInner::CmceCallControl(CallControl::FloorReleased { call_id, ts }),
+        });
+
+        if call.called_over_brew || call.calling_over_brew {
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Brew,
+                msg: SapMsgInner::CmceCallControl(CallControl::FloorReleased { call_id, ts }),
+            });
+        }
+    }
+
     /// Handle parsed U-SETUP and dispatch into group/individual FSM paths.
     pub(in crate::cmce::subentities::cc_bs) fn fsm_on_u_setup(
         &mut self,
@@ -45,164 +109,51 @@ impl CcBsSubentity {
         let call_id = pdu.call_identifier;
 
         if let Some(call) = self.individual_calls.get(&call_id).cloned() {
-            // For simplex PTT individual calls: MS released PTT.
-            // Send D-TX-CEASED to the sender (confirms floor released),
-            // then grant floor to the peer via D-TX-GRANTED so they can speak immediately.
-            // Radios with GrantedToOtherUser in D-CONNECT need an explicit D-TX-GRANTED
-            // to enable their PTT button — D-TX-CEASED alone is not sufficient.
             if !call.is_active() {
                 tracing::debug!("U-TX CEASED for inactive individual call_id={}, ignoring", call_id);
                 return;
             }
-            let (sender_ts, sender_usage, peer_addr, peer_ts, peer_usage) = if sender.ssi == call.calling_addr.ssi {
-                (
-                    call.calling_ts,
-                    call.calling_usage,
-                    call.called_addr,
-                    call.called_ts,
-                    call.called_usage,
-                )
-            } else {
-                (
-                    call.called_ts,
-                    call.called_usage,
-                    call.calling_addr,
-                    call.calling_ts,
-                    call.calling_usage,
-                )
-            };
-            tracing::info!(
-                "U-TX CEASED (individual) call_id={} from ISSI {} -> sending D-TX-CEASED to sender, D-TX-GRANTED to peer ISSI {}",
-                call_id,
-                sender.ssi,
-                peer_addr.ssi
-            );
-
-            // 1) D-TX-CEASED to sender so it knows floor was released and resets PTT state.
-            tracing::info!(
-                "-> D-TX CEASED (individual simplex, FACCH) call_id={} to sender ISSI {}",
-                call_id,
-                sender.ssi
-            );
-            let ceased_pdu = DTxCeased {
-                call_identifier: call_id,
-                transmission_request_permission: false,
-                notification_indicator: None,
-                facility: None,
-                dm_ms_address: None,
-                proprietary: None,
-            };
-            let mut ceased_sdu = BitBuffer::new_autoexpand(30);
-            ceased_pdu.to_bitbuf(&mut ceased_sdu).expect("Failed to serialize DTxCeased");
-            ceased_sdu.seek(0);
-            // Former speaker becomes listener: DL-only so they receive the peer's audio.
-            let ceased_msg = Self::build_sapmsg_stealing_ul_dl(ceased_sdu, sender, sender_ts, Some(sender_usage), UlDlAssignment::Dl);
-            queue.push_back(ceased_msg);
-
-            // 2) D-TX-GRANTED(Granted) to peer so it immediately gets the floor and can press PTT.
-            // Without this explicit grant, radios that received GrantedToOtherUser in D-CONNECT
-            // will not enable PTT after a D-TX-CEASED — they require an explicit D-TX-GRANTED.
-            // Use UL-only so the new speaker transmits but does not loop back its own audio.
-            self.tpi_update_talker(call_id, peer_addr.ssi);
-            let tpi_facility = self.tpi_inform_for_call(call_id);
-            tracing::info!(
-                "-> D-TX GRANTED Granted (individual simplex, FACCH) call_id={} to peer ISSI {}",
-                call_id,
-                peer_addr.ssi
-            );
-            let granted_pdu = DTxGranted {
-                call_identifier: call_id,
-                transmission_grant: TransmissionGrant::Granted.into_raw() as u8,
-                transmission_request_permission: false,
-                encryption_control: false,
-                reserved: false,
-                notification_indicator: None,
-                transmitting_party_type_identifier: Some(1),
-                transmitting_party_address_ssi: Some(peer_addr.ssi as u64),
-                transmitting_party_extension: None,
-                external_subscriber_number: None,
-                facility: tpi_facility.clone(),
-                dm_ms_address: None,
-                proprietary: None,
-            };
-            let mut granted_sdu = BitBuffer::new_autoexpand(50);
-            granted_pdu.to_bitbuf(&mut granted_sdu).expect("Failed to serialize DTxGranted");
-            granted_sdu.seek(0);
-            // New speaker gets UL-only assignment so they transmit.
-            let granted_msg = Self::build_sapmsg_stealing_ul_dl(granted_sdu, peer_addr, peer_ts, Some(peer_usage), UlDlAssignment::Ul);
-            queue.push_back(granted_msg);
-
-            // 3) D-TX-GRANTED(GrantedToOtherUser) back to former sender so it knows the peer
-            // now holds the floor and it is the listener. This mirrors what U-TX-DEMAND sends
-            // and keeps both radios in sync on who has UL vs DL for the remainder of the call.
-            tracing::info!(
-                "-> D-TX GRANTED GrantedToOtherUser (individual simplex, FACCH) call_id={} to former sender ISSI {} (now listener)",
-                call_id,
-                sender.ssi
-            );
-            let gtou_pdu = DTxGranted {
-                call_identifier: call_id,
-                transmission_grant: TransmissionGrant::GrantedToOtherUser.into_raw() as u8,
-                transmission_request_permission: false,
-                encryption_control: false,
-                reserved: false,
-                notification_indicator: None,
-                transmitting_party_type_identifier: Some(1),
-                transmitting_party_address_ssi: Some(peer_addr.ssi as u64),
-                transmitting_party_extension: None,
-                external_subscriber_number: None,
-                facility: tpi_facility,
-                dm_ms_address: None,
-                proprietary: None,
-            };
-            let mut gtou_sdu = BitBuffer::new_autoexpand(50);
-            gtou_pdu
-                .to_bitbuf(&mut gtou_sdu)
-                .expect("Failed to serialize DTxGranted GrantedToOtherUser");
-            gtou_sdu.seek(0);
-            // Former sender is now listener: DL-only assignment (already set by ceased_msg above,
-            // but the explicit D-TX-GRANTED ensures the radio re-enables its PTT request button).
-            let gtou_msg = Self::build_sapmsg_stealing_ul_dl(gtou_sdu, sender, sender_ts, Some(sender_usage), UlDlAssignment::Dl);
-            queue.push_back(gtou_msg);
-
-            // 4) Notify UMAC that the floor has been granted to the peer.
-            // This resets the UL inactivity timer on the timeslot so UMAC doesn't
-            // prematurely detect inactivity and close the circuit before the new
-            // speaker begins transmitting.
-            queue.push_back(SapMsg {
-                sap: Sap::Control,
-                src: TetraEntity::Cmce,
-                dest: TetraEntity::Umac,
-                msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+            if call.simplex_duplex {
+                tracing::trace!("U-TX CEASED for duplex individual call_id={}, ignoring", call_id);
+                return;
+            }
+            let Some((_, sender_ts, sender_usage)) = call.leg_for(sender.ssi) else {
+                tracing::warn!(
+                    "U-TX CEASED (individual) call_id={} from non-participant ISSI {}, ignoring",
                     call_id,
-                    source_issi: peer_addr.ssi,
-                    dest_gssi: sender.ssi,
-                    ts: peer_ts,
-                    uplink_expected: true,
-                }),
-            });
-
-            // 5) Notify Brew that the floor has been granted to the peer.
-            // Without this, Brew detects audio inactivity on the timeslot and sends
-            // a CALL_RELEASE, tearing down the circuit before the handoff completes.
-            if (call.called_over_brew || call.calling_over_brew)
-                && let Some(brew_uuid) = call.brew_uuid
-            {
-                queue.push_back(SapMsg {
-                    sap: Sap::Control,
-                    src: TetraEntity::Cmce,
-                    dest: TetraEntity::Brew,
-                    msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
-                        call_id,
-                        source_issi: peer_addr.ssi,
-                        dest_gssi: sender.ssi,
-                        ts: peer_ts,
-                        uplink_expected: true,
-                    }),
-                });
-                let _ = brew_uuid; // suppress unused warning
+                    sender.ssi
+                );
+                return;
+            };
+            if call.floor_holder != Some(sender.ssi) {
+                tracing::warn!(
+                    "U-TX CEASED (individual) call_id={} from ISSI {} rejected; floor_holder={:?}",
+                    call_id,
+                    sender.ssi,
+                    call.floor_holder
+                );
+                return;
             }
 
+            if let Some(active_call) = self.individual_calls.get_mut(&call_id) {
+                active_call.floor_holder = None;
+            }
+
+            tracing::info!(
+                "U-TX CEASED (individual simplex) call_id={} holder ISSI {} released floor",
+                call_id,
+                sender.ssi
+            );
+            if call.is_local_participant(sender.ssi) {
+                self.send_d_tx_ceased_individual(queue, call_id, sender, sender_ts, sender_usage);
+            }
+            if let Some(peer_addr) = call.peer_addr_for(sender.ssi)
+                && call.is_local_participant(peer_addr.ssi)
+                && let Some((_, peer_ts, peer_usage)) = call.leg_for(peer_addr.ssi)
+            {
+                self.send_d_tx_ceased_individual(queue, call_id, peer_addr, peer_ts, peer_usage);
+            }
+            self.notify_individual_floor_released(queue, &call, call_id, sender_ts);
             return;
         }
 
@@ -232,6 +183,7 @@ impl CcBsSubentity {
                 }
                 GroupTransitionError::MissingCachedSetup(_) => {
                     tracing::error!("U-TX CEASED call_id={} missing cached D-SETUP", call_id);
+                    self.release_group_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
                 }
             }
         }
@@ -247,99 +199,110 @@ impl CcBsSubentity {
         let call_id = pdu.call_identifier;
 
         if let Some(call) = self.individual_calls.get(&call_id).cloned() {
-            // For simplex PTT individual calls: MS requests PTT floor.
             if !call.is_active() {
                 tracing::debug!("U-TX DEMAND for inactive individual call_id={}, ignoring", call_id);
                 return;
             }
-            let (peer_addr, peer_ts, peer_usage) = if requesting_party.ssi == call.calling_addr.ssi {
-                (call.called_addr, call.called_ts, call.called_usage)
-            } else {
-                (call.calling_addr, call.calling_ts, call.calling_usage)
+            if call.simplex_duplex {
+                tracing::trace!("U-TX DEMAND for duplex individual call_id={}, ignoring", call_id);
+                return;
+            }
+            let Some((_, req_ts, req_usage)) = call.leg_for(requesting_party.ssi) else {
+                tracing::warn!(
+                    "U-TX DEMAND (individual) call_id={} from non-participant ISSI {}, ignoring",
+                    call_id,
+                    requesting_party.ssi
+                );
+                return;
             };
-            tracing::info!(
-                "U-TX DEMAND (individual) call_id={} from ISSI {} -> granting floor, notifying peer ISSI {}",
-                call_id,
-                requesting_party.ssi,
-                peer_addr.ssi
-            );
-            self.tpi_update_talker(call_id, requesting_party.ssi);
-            let tpi_facility = self.tpi_inform_for_call(call_id);
+            if !call.tx_demand_priority_allowed(pdu.tx_demand_priority) {
+                tracing::warn!(
+                    "U-TX DEMAND (individual) call_id={} from ISSI {} priority={} below call priority={}, denying",
+                    call_id,
+                    requesting_party.ssi,
+                    pdu.tx_demand_priority,
+                    call.call_priority
+                );
+                if call.is_local_participant(requesting_party.ssi) {
+                    self.fsm_send_d_tx_granted_individual(
+                        queue,
+                        call_id,
+                        requesting_party,
+                        req_ts,
+                        req_usage,
+                        TransmissionGrant::NotGranted,
+                        call.floor_holder,
+                    );
+                }
+                return;
+            }
+            if let Some(holder) = call.floor_holder {
+                tracing::debug!(
+                    "U-TX DEMAND (individual) call_id={} from ISSI {} denied; floor held by ISSI {}",
+                    call_id,
+                    requesting_party.ssi,
+                    holder
+                );
+                if holder != requesting_party.ssi && call.is_local_participant(requesting_party.ssi) {
+                    self.fsm_send_d_tx_granted_individual(
+                        queue,
+                        call_id,
+                        requesting_party,
+                        req_ts,
+                        req_usage,
+                        TransmissionGrant::NotGranted,
+                        Some(holder),
+                    );
+                }
+                return;
+            }
 
-            // D-TX-GRANTED to requester (Granted) — they may now transmit.
-            // For simplex: give them UL-only so they transmit but don't receive their own TX.
-            let dtg_req = DTxGranted {
-                call_identifier: call_id,
-                transmission_grant: TransmissionGrant::Granted.into_raw() as u8,
-                transmission_request_permission: false,
-                encryption_control: false,
-                reserved: false,
-                notification_indicator: None,
-                transmitting_party_type_identifier: Some(1),
-                transmitting_party_address_ssi: Some(requesting_party.ssi as u64),
-                transmitting_party_extension: None,
-                external_subscriber_number: None,
-                facility: tpi_facility.clone(),
-                dm_ms_address: None,
-                proprietary: None,
-            };
+            if let Some(active_call) = self.individual_calls.get_mut(&call_id) {
+                active_call.floor_holder = Some(requesting_party.ssi);
+            }
+            self.tpi_update_talker(call_id, requesting_party.ssi);
+
             tracing::info!(
-                "-> D-TX GRANTED Granted (individual simplex) call_id={} to ISSI {}",
+                "U-TX DEMAND (individual simplex) call_id={} from ISSI {} granted",
                 call_id,
                 requesting_party.ssi
             );
-            let mut dtg_req_sdu = BitBuffer::new_autoexpand(50);
-            dtg_req.to_bitbuf(&mut dtg_req_sdu).expect("Failed to serialize DTxGranted");
-            dtg_req_sdu.seek(0);
-            let req_ts = if requesting_party.ssi == call.calling_addr.ssi {
-                call.calling_ts
-            } else {
-                call.called_ts
-            };
-            let req_usage = if requesting_party.ssi == call.calling_addr.ssi {
-                call.calling_usage
-            } else {
-                call.called_usage
-            };
-            // Requester now owns the floor: give UL-only assignment so they transmit.
-            let dtg_req_msg = Self::build_sapmsg_stealing_ul_dl(dtg_req_sdu, requesting_party, req_ts, Some(req_usage), UlDlAssignment::Ul);
-            queue.push_back(dtg_req_msg);
-
-            // D-TX-GRANTED to peer (GrantedToOtherUser) — they must listen.
-            // ETSI 14.8.43: permission=false means "allowed to request transmission".
-            // Peer should still be allowed to U-TX-DEMAND once the current speaker releases
-            // the floor; sending true (= not allowed) would lock peer out of PTT permanently.
-            let dtg_peer = DTxGranted {
-                call_identifier: call_id,
-                transmission_grant: TransmissionGrant::GrantedToOtherUser.into_raw() as u8,
-                transmission_request_permission: false,
-                encryption_control: false,
-                reserved: false,
-                notification_indicator: None,
-                transmitting_party_type_identifier: Some(1),
-                transmitting_party_address_ssi: Some(requesting_party.ssi as u64),
-                transmitting_party_extension: None,
-                external_subscriber_number: None,
-                facility: tpi_facility,
-                dm_ms_address: None,
-                proprietary: None,
-            };
-            tracing::info!(
-                "-> D-TX GRANTED GrantedToOtherUser (individual simplex) call_id={} to ISSI {}",
-                call_id,
-                peer_addr.ssi
-            );
-            let mut dtg_peer_sdu = BitBuffer::new_autoexpand(50);
-            dtg_peer.to_bitbuf(&mut dtg_peer_sdu).expect("Failed to serialize DTxGranted peer");
-            dtg_peer_sdu.seek(0);
-            // Peer is now the listener: give DL-only assignment so they receive only.
-            let dtg_peer_msg = Self::build_sapmsg_stealing_ul_dl(dtg_peer_sdu, peer_addr, peer_ts, Some(peer_usage), UlDlAssignment::Dl);
-            queue.push_back(dtg_peer_msg);
+            if call.is_local_participant(requesting_party.ssi) {
+                self.fsm_send_d_tx_granted_individual(
+                    queue,
+                    call_id,
+                    requesting_party,
+                    req_ts,
+                    req_usage,
+                    TransmissionGrant::Granted,
+                    Some(requesting_party.ssi),
+                );
+            }
+            if let Some(peer_addr) = call.peer_addr_for(requesting_party.ssi)
+                && call.is_local_participant(peer_addr.ssi)
+                && let Some((_, peer_ts, peer_usage)) = call.leg_for(peer_addr.ssi)
+            {
+                self.fsm_send_d_tx_granted_individual(
+                    queue,
+                    call_id,
+                    peer_addr,
+                    peer_ts,
+                    peer_usage,
+                    TransmissionGrant::GrantedToOtherUser,
+                    Some(requesting_party.ssi),
+                );
+            }
+            self.notify_individual_floor_granted(queue, &call, call_id, requesting_party.ssi, req_ts);
             return;
         }
 
-        tracing::info!("U-TX DEMAND: ISSI {} requests floor on call_id={}", requesting_party.ssi, call_id);
-        if let Err(err) = self.fsm_group_on_tx_demand(queue, call_id, requesting_party) {
+        tracing::info!(
+            "U-TX DEMAND: ISSI {} requests floor on call_id={} priority={}",
+            requesting_party.ssi,
+            call_id,
+            pdu.tx_demand_priority
+        );
+        if let Err(err) = self.fsm_group_on_tx_demand(queue, call_id, requesting_party, pdu.tx_demand_priority) {
             match err {
                 GroupTransitionError::UnknownCall(_) => {
                     tracing::warn!("U-TX DEMAND for unknown call_id={}", call_id);
@@ -353,6 +316,7 @@ impl CcBsSubentity {
                 }
                 GroupTransitionError::MissingCachedSetup(_) => {
                     tracing::error!("U-TX DEMAND call_id={} missing cached D-SETUP", call_id);
+                    self.release_group_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
                 }
                 GroupTransitionError::NotCurrentSpeaker { .. } => {
                     tracing::debug!("U-TX DEMAND hit unexpected NotCurrentSpeaker transition error call_id={}", call_id);
@@ -478,12 +442,32 @@ impl CcBsSubentity {
         tracing::info!("U-RELEASE: call_id={} cause={}", call_id, disconnect_cause);
         if let Some(call_snapshot) = self.individual_calls.get(&call_id).cloned() {
             tracing::info!("U-RELEASE (individual) call_id={} cause={}", call_id, disconnect_cause);
+            if !call_snapshot.is_participant(sender.ssi) {
+                tracing::warn!(
+                    "U-RELEASE (individual) call_id={} from non-participant ISSI {}, ignoring",
+                    call_id,
+                    sender.ssi
+                );
+                return;
+            }
             let sender_is_called = sender.ssi == call_snapshot.called_addr.ssi;
             if !call_snapshot.called_over_brew && !call_snapshot.calling_over_brew && (call_snapshot.is_active() || sender_is_called) {
                 self.send_d_disconnect_individual(queue, call_id, &call_snapshot, sender, disconnect_cause);
             }
             self.release_individual_call(queue, call_id, disconnect_cause);
         } else {
+            let Some(call) = self.active_calls.get(&call_id) else {
+                tracing::debug!("U-RELEASE for unknown call_id={} (likely duplicate)", call_id);
+                return;
+            };
+            if !call.is_release_authorized(sender.ssi) {
+                tracing::warn!(
+                    "U-RELEASE (group) call_id={} from unauthorized ISSI {} (owner/current speaker required), ignoring",
+                    call_id,
+                    sender.ssi
+                );
+                return;
+            }
             self.release_group_call(queue, call_id, disconnect_cause);
         }
     }
@@ -503,6 +487,14 @@ impl CcBsSubentity {
 
         if let Some(call_snapshot) = self.individual_calls.get(&call_id).cloned() {
             tracing::info!("U-DISCONNECT (individual) call_id={} cause={}", call_id, disconnect_cause);
+            if !call_snapshot.is_participant(sender.ssi) {
+                tracing::warn!(
+                    "U-DISCONNECT (individual) call_id={} from non-participant ISSI {}, ignoring",
+                    call_id,
+                    sender.ssi
+                );
+                return;
+            }
             let sender_is_called = sender.ssi == call_snapshot.called_addr.ssi;
             if !call_snapshot.called_over_brew && !call_snapshot.calling_over_brew && (call_snapshot.is_active() || sender_is_called) {
                 self.send_d_disconnect_individual(queue, call_id, &call_snapshot, sender, disconnect_cause);
@@ -516,10 +508,8 @@ impl CcBsSubentity {
             return;
         };
 
-        let is_call_owner = matches!(&call.origin, CallOrigin::Local { caller_addr } if caller_addr.ssi == sender.ssi);
-
-        if is_call_owner {
-            tracing::info!("U-DISCONNECT: call owner ISSI {} disconnecting call_id={}", sender.ssi, call_id);
+        if call.is_release_authorized(sender.ssi) {
+            tracing::info!("U-DISCONNECT: authorized ISSI {} disconnecting call_id={}", sender.ssi, call_id);
             self.release_group_call(queue, call_id, DisconnectCause::UserRequestedDisconnection);
             return;
         }
@@ -533,7 +523,7 @@ impl CcBsSubentity {
 
         let d_release = DRelease {
             call_identifier: call_id,
-            disconnect_cause: DisconnectCause::RequestedServiceNotAvailable,
+            disconnect_cause: DisconnectCause::NonCallOwnerRequestedDisconnection,
             notification_indicator: None,
             facility: None,
             proprietary: None,

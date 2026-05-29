@@ -16,6 +16,18 @@ pub enum TxState {
     Acknowledged = 4,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TxReportError {
+    AckNotExpected {
+        target: TxState,
+    },
+    InvalidTransition {
+        expected: TxState,
+        target: TxState,
+        actual: TxState,
+    },
+}
+
 impl TxState {
     fn from_raw(v: u8) -> Self {
         match v {
@@ -103,21 +115,30 @@ impl TxReporter {
         }
     }
 
-    fn mark(&self, curr_state: TxState, new_state: TxState) {
+    fn try_mark(&self, curr_state: TxState, new_state: TxState) -> Result<(), TxReportError> {
         // tracing::info!("TxReporter: marking {:?} -> {:?}", curr_state, new_state);
         match self
             .state
             .compare_exchange(curr_state as u8, new_state as u8, Ordering::Relaxed, Ordering::Relaxed)
         {
-            Ok(_) => {}
-            Err(_) => {
-                panic!(
-                    "TxReporter: invalid transition {:?} -> {:?} (actual state: {:?})",
-                    curr_state,
-                    new_state,
-                    self.get_state()
-                );
+            Ok(_) => Ok(()),
+            Err(actual) => {
+                let actual = TxState::from_raw(actual);
+                if actual == new_state {
+                    return Ok(());
+                }
+                Err(TxReportError::InvalidTransition {
+                    expected: curr_state,
+                    target: new_state,
+                    actual,
+                })
             }
+        }
+    }
+
+    fn mark(&self, curr_state: TxState, new_state: TxState) {
+        if let Err(err) = self.try_mark(curr_state, new_state) {
+            tracing::warn!("TxReporter: ignoring invalid/late transition: {:?}", err);
         }
     }
 
@@ -130,27 +151,47 @@ impl TxReporter {
         self.mark(TxState::Pending, TxState::Transmitted);
     }
 
+    pub fn try_mark_transmitted(&self) -> Result<(), TxReportError> {
+        self.try_mark(TxState::Pending, TxState::Transmitted)
+    }
+
     /// Pending → Discarded: MAC layer was too busy to transmit.
     pub fn mark_discarded(&self) {
         self.mark(TxState::Pending, TxState::Discarded);
     }
 
+    pub fn try_mark_discarded(&self) -> Result<(), TxReportError> {
+        self.try_mark(TxState::Pending, TxState::Discarded)
+    }
+
     /// Transmitted → Acknowledged: LLC received an ACK from the remote side.
     pub fn mark_acknowledged(&self) {
-        assert!(
-            self.expects_ack,
-            "TxReporter: cannot mark as acknowledged a message that does not expect an ACK"
-        );
-        self.mark(TxState::Transmitted, TxState::Acknowledged);
+        if let Err(err) = self.try_mark_acknowledged() {
+            tracing::warn!("TxReporter: ignoring acknowledge mark: {:?}", err);
+        }
+    }
+
+    pub fn try_mark_acknowledged(&self) -> Result<(), TxReportError> {
+        if !self.expects_ack {
+            return Err(TxReportError::AckNotExpected {
+                target: TxState::Acknowledged,
+            });
+        }
+        self.try_mark(TxState::Transmitted, TxState::Acknowledged)
     }
 
     /// Transmitted → Lost: LLC did not receive an ACK within the expected time window.
     pub fn mark_lost(&self) {
-        assert!(
-            self.expects_ack,
-            "TxReporter: cannot mark as lost a message that does not expect an ACK"
-        );
-        self.mark(TxState::Transmitted, TxState::Lost);
+        if let Err(err) = self.try_mark_lost() {
+            tracing::warn!("TxReporter: ignoring lost mark: {:?}", err);
+        }
+    }
+
+    pub fn try_mark_lost(&self) -> Result<(), TxReportError> {
+        if !self.expects_ack {
+            return Err(TxReportError::AckNotExpected { target: TxState::Lost });
+        }
+        self.try_mark(TxState::Transmitted, TxState::Lost)
     }
 
     /// Tricky function to re-use linked TxReporters. Resets state to the initial state.
@@ -186,28 +227,42 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "invalid transition")]
-    fn double_mark_transmitted_panics() {
+    fn double_mark_transmitted_is_idempotent() {
         let receipt = TxReporter::new();
         let reporter = receipt.clone();
         reporter.mark_transmitted();
         reporter.mark_transmitted();
+        assert_eq!(receipt.get_state(), TxState::Transmitted);
     }
 
     #[test]
-    #[should_panic(expected = "cannot mark as acknowledged")]
-    fn unacked_mark_acked_panics() {
+    fn unacked_mark_acked_returns_error_and_does_not_panic() {
         let receipt = TxReporter::new_unacked();
         let reporter = receipt.clone();
         reporter.mark_transmitted();
         reporter.mark_acknowledged();
+        assert_eq!(receipt.get_state(), TxState::Transmitted);
+        assert_eq!(
+            reporter.try_mark_acknowledged(),
+            Err(TxReportError::AckNotExpected {
+                target: TxState::Acknowledged,
+            })
+        );
     }
 
     #[test]
-    #[should_panic(expected = "invalid transition")]
-    fn mark_acknowledged_from_pending_panics() {
+    fn mark_acknowledged_from_pending_returns_error_and_does_not_panic() {
         let receipt = TxReporter::new();
         let reporter = receipt.clone();
         reporter.mark_acknowledged(); // must be Transmitted first
+        assert_eq!(receipt.get_state(), TxState::Pending);
+        assert_eq!(
+            reporter.try_mark_acknowledged(),
+            Err(TxReportError::InvalidTransition {
+                expected: TxState::Transmitted,
+                target: TxState::Acknowledged,
+                actual: TxState::Pending,
+            })
+        );
     }
 }

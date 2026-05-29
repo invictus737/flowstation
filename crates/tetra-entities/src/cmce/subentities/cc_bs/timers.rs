@@ -81,7 +81,7 @@ impl CcBsSubentity {
 
                             let reporter = TxReporter::new_unacked();
                             cached.last_reporter = Some(reporter.clone());
-                            let (sdu, chan_alloc) = Self::build_d_setup_prim(&cached.pdu, usage, ts, UlDlAssignment::Both);
+                            let (sdu, chan_alloc) = Self::build_compact_late_entry_d_setup_prim(&cached.pdu, usage, ts);
                             let prim = Self::build_sapmsg(sdu, Some(chan_alloc), dest_addr, Layer2Service::Unacknowledged, Some(reporter));
                             queue.push_back(prim);
                         }
@@ -290,7 +290,7 @@ impl CcBsSubentity {
             let Some(cached) = self.cached_setups.get(&call_id) else {
                 continue;
             };
-            if !cached.is_individual {
+            if !cached.is_individual || !cached.resend {
                 continue;
             }
             let mut sdu = BitBuffer::new_autoexpand(80);
@@ -372,11 +372,12 @@ impl CcBsSubentity {
         tracing::warn!("UL inactivity timeout on ts={}, forcing TX ceased for call_id={}", ts, call_id);
 
         let dest_gssi = call.dest_gssi;
+        let usage = call.usage;
         call.tx_active = false;
         call.hangtime_start = Some(self.dltime);
 
         // Send D-TX CEASED via FACCH to all group members
-        self.send_d_tx_ceased_facch(queue, call_id, dest_gssi, ts);
+        self.send_d_tx_ceased_facch(queue, call_id, dest_gssi, ts, usage);
 
         // Notify UMAC to enter hangtime signalling mode
         queue.push_back(SapMsg {

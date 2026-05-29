@@ -2,8 +2,11 @@ use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
+use std::process::{Command, Stdio};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tungstenite::{
     Message, accept_hdr,
@@ -21,6 +24,12 @@ type CmdSender = crossbeam_channel::Sender<ControlCommand>;
 // broadcast() sends to all of them; dead connections are pruned automatically.
 type WsBroadcastTx = crossbeam_channel::Sender<String>;
 type WsClients = Arc<Mutex<Vec<WsBroadcastTx>>>;
+
+static PROCESS_RUNNING: OnceLock<Arc<AtomicBool>> = OnceLock::new();
+
+pub fn set_process_running_flag(flag: Arc<AtomicBool>) {
+    let _ = PROCESS_RUNNING.set(flag);
+}
 
 pub struct DashboardServer {
     pub state: DashboardState,
@@ -397,23 +406,19 @@ fn handle_connection(
     } else if req_line.contains("GET /api/config") {
         let mut buf = BufReader::new(stream);
         let headers = read_http_headers(&mut buf);
-        if allow_config_api {
-            if is_authorized(&headers.token, &auth_token) {
-                serve_config_get(buf.into_inner(), &config_path);
-            } else {
-                http_response(buf.into_inner(), 401, "dashboard auth required");
-            }
+        if auth_token.is_some() && !is_authorized(&headers.token, &auth_token) {
+            http_response(buf.into_inner(), 401, "dashboard auth required");
         } else {
-            http_response(buf.into_inner(), 403, "dashboard config API disabled");
+            serve_config_get(buf.into_inner(), &config_path);
         }
     } else if req_line.contains("POST /api/config") {
         let mut buf = BufReader::new(stream);
         let headers = read_http_headers(&mut buf);
-        if !allow_config_api {
+        if auth_token.is_some() && !allow_config_api {
             http_response(buf.into_inner(), 403, "dashboard config API disabled");
             return;
         }
-        if !is_authorized(&headers.token, &auth_token) {
+        if auth_token.is_some() && !is_authorized(&headers.token, &auth_token) {
             http_response(buf.into_inner(), 401, "dashboard auth required");
             return;
         }
@@ -440,7 +445,10 @@ fn handle_connection(
             return;
         }
         match atomic_write_config(&config_path, body_str.as_bytes()) {
-            Ok(_) => http_response(buf.into_inner(), 200, "OK"),
+            Ok(_) => {
+                tracing::info!(path = %config_path, bytes = body_str.len(), "Dashboard: config saved");
+                http_response(buf.into_inner(), 200, "OK")
+            }
             Err(e) => http_response(buf.into_inner(), 500, &e.to_string()),
         }
     } else {
@@ -517,9 +525,7 @@ fn handle_ws(
         // Then check for inbound messages from browser
         match ws.read() {
             Ok(Message::Text(text)) => {
-                if allow_control_commands {
-                    handle_ws_command(&text, &state, &cmd_tx);
-                }
+                handle_ws_command(&text, &state, &cmd_tx, allow_control_commands);
             }
             Ok(Message::Close(_)) => break,
             Ok(Message::Ping(data)) => {
@@ -533,7 +539,7 @@ fn handle_ws(
     }
 }
 
-fn handle_ws_command(text: &str, state: &DashboardState, cmd_tx: &Arc<Mutex<Option<CmdSender>>>) {
+fn handle_ws_command(text: &str, state: &DashboardState, cmd_tx: &Arc<Mutex<Option<CmdSender>>>, allow_control_commands: bool) {
     const MAX_WS_COMMAND_BYTES: usize = 4096;
     const MAX_SDS_BYTES: usize = 140;
     const MAX_TETRA_SSI: u64 = 0x00FF_FFFF;
@@ -558,6 +564,10 @@ fn handle_ws_command(text: &str, state: &DashboardState, cmd_tx: &Arc<Mutex<Opti
 
     match v.get("type").and_then(|t| t.as_str()) {
         Some("kick") => {
+            if !allow_control_commands {
+                tracing::warn!("Dashboard: kick ignored; control commands are disabled");
+                return;
+            }
             let Some(issi_raw) = v.get("issi").and_then(|i| i.as_u64()) else {
                 return;
             };
@@ -573,12 +583,26 @@ fn handle_ws_command(text: &str, state: &DashboardState, cmd_tx: &Arc<Mutex<Opti
             s.push_log("INFO", format!("Kick requested for ISSI {}", issi));
         }
         Some("restart") => {
-            tracing::warn!("Dashboard: restart command ignored; service control is disabled in the embedded dashboard");
+            tracing::warn!("Dashboard: restart requested");
+            {
+                let mut s = state.write().unwrap();
+                s.push_log("WARN", "Restart requested from dashboard".to_string());
+            }
+            schedule_process_restart(state);
         }
         Some("shutdown") => {
-            tracing::warn!("Dashboard: shutdown command ignored; service control is disabled in the embedded dashboard");
+            tracing::warn!("Dashboard: shutdown requested");
+            {
+                let mut s = state.write().unwrap();
+                s.push_log("WARN", "Shutdown requested from dashboard".to_string());
+            }
+            schedule_process_shutdown();
         }
         Some("sds") => {
+            if !allow_control_commands {
+                tracing::warn!("Dashboard: SDS ignored; control commands are disabled");
+                return;
+            }
             let Some(dest_raw) = v.get("dest_issi").and_then(|i| i.as_u64()) else {
                 return;
             };
@@ -611,6 +635,76 @@ fn handle_ws_command(text: &str, state: &DashboardState, cmd_tx: &Arc<Mutex<Opti
     }
 }
 
+fn schedule_process_shutdown() {
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_millis(250));
+        if let Some(running) = PROCESS_RUNNING.get() {
+            running.store(false, Ordering::SeqCst);
+        } else {
+            tracing::error!("Dashboard shutdown requested before process control was registered");
+        }
+    });
+}
+
+fn schedule_process_restart(state: &DashboardState) {
+    let config_path = state
+        .read()
+        .map(|s| s.config_path.clone())
+        .unwrap_or_else(|_| "config.toml".to_string());
+
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(350));
+
+        let exe = match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(e) => {
+                tracing::error!("Dashboard restart failed: cannot resolve current executable: {}", e);
+                return;
+            }
+        };
+        let cwd = std::env::current_dir().ok();
+
+        let cwd = cwd.unwrap_or_else(|| Path::new(".").to_path_buf());
+        let old_pid = std::process::id();
+        let script = format!(
+            "while kill -0 {} 2>/dev/null; do sleep 1; done; sleep 5; cd {} && exec {} {} >>/tmp/librestation-bs-live.log 2>&1 </dev/null",
+            old_pid,
+            shell_quote(&cwd.to_string_lossy()),
+            shell_quote(&exe.to_string_lossy()),
+            shell_quote(&config_path),
+        );
+
+        match Command::new("/bin/sh")
+            .arg("-c")
+            .arg(script)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            Ok(child) => {
+                tracing::warn!(
+                    "Dashboard restart helper spawned pid {} config_path={} start_delay_secs=5",
+                    child.id(),
+                    config_path
+                );
+                if let Some(running) = PROCESS_RUNNING.get() {
+                    running.store(false, Ordering::SeqCst);
+                } else {
+                    tracing::error!("Dashboard restart requested before process control was registered");
+                }
+            }
+            Err(e) => {
+                tracing::error!("Dashboard restart failed to spawn helper for {:?} {}: {}", exe, config_path, e);
+            }
+        }
+    });
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
 fn serve_html(mut stream: TcpStream) {
     let body = DASHBOARD_HTML.replace("{{STACK_VERSION}}", tetra_core::STACK_VERSION);
     let body = body.as_bytes();
@@ -627,7 +721,7 @@ fn serve_config_get(mut stream: TcpStream, config_path: &str) {
         Ok(content) => {
             let body = content.as_bytes();
             let header = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store, max-age=0\r\nPragma: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
             let _ = stream.write_all(header.as_bytes());
@@ -640,7 +734,7 @@ fn serve_config_get(mut stream: TcpStream, config_path: &str) {
 fn http_response(mut stream: TcpStream, code: u16, body: &str) {
     let status = if code == 200 { "OK" } else { "Error" };
     let resp = format!(
-        "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        "HTTP/1.1 {} {}\r\nContent-Type: text/plain\r\nCache-Control: no-store, max-age=0\r\nPragma: no-cache\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         code,
         status,
         body.len(),

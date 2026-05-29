@@ -168,7 +168,7 @@ local_ssi_ranges = [
 # OPTIONAL: Additional cell parameters
 
 # neighbor_cell_broadcast = 0
-# late_entry_supported = true
+# late_entry_supported = true  # Defaults to true.
 # subscriber_class = 0xFFFF
 # registration = true
 # deregistration = true

@@ -76,6 +76,28 @@ impl CcBsSubentity {
         (sdu, chan_alloc)
     }
 
+    pub(super) fn build_compact_late_entry_d_setup_prim(pdu: &DSetup, usage: u8, ts: u8) -> (BitBuffer, CmceChanAllocReq) {
+        let compact = DSetup {
+            call_identifier: pdu.call_identifier,
+            call_time_out: pdu.call_time_out,
+            hook_method_selection: pdu.hook_method_selection,
+            simplex_duplex_selection: pdu.simplex_duplex_selection,
+            basic_service_information: pdu.basic_service_information.clone(),
+            transmission_grant: pdu.transmission_grant,
+            transmission_request_permission: pdu.transmission_request_permission,
+            call_priority: pdu.call_priority,
+            notification_indicator: None,
+            temporary_address: None,
+            calling_party_address_ssi: None,
+            calling_party_extension: None,
+            external_subscriber_number: None,
+            facility: None,
+            dm_ms_address: None,
+            proprietary: None,
+        };
+        Self::build_d_setup_prim(&compact, usage, ts, UlDlAssignment::Both)
+    }
+
     /// Build a generic SAP message addressed to MLE via LCMC.
     /// `layer2service` controls acknowledged vs unacknowledged LLC.
     pub(super) fn build_sapmsg(
@@ -758,8 +780,16 @@ impl CcBsSubentity {
     }
 
     /// Send D-TX GRANTED via FACCH stealing on the group traffic channel.
-    pub(super) fn send_d_tx_granted_facch(&mut self, queue: &mut MessageQueue, call_id: u16, source_issi: u32, dest_gssi: u32, ts: u8) {
-        let facility = self.tpi_for_speaker(call_id, source_issi);
+    pub(super) fn send_d_tx_granted_facch(
+        &mut self,
+        queue: &mut MessageQueue,
+        call_id: u16,
+        source_issi: u32,
+        dest_gssi: u32,
+        ts: u8,
+        usage: u8,
+    ) {
+        self.tpi_update_talker(call_id, source_issi);
         let pdu = DTxGranted {
             call_identifier: call_id,
             transmission_grant: TransmissionGrant::GrantedToOtherUser.into_raw() as u8,
@@ -771,7 +801,7 @@ impl CcBsSubentity {
             transmitting_party_address_ssi: Some(source_issi as u64),
             transmitting_party_extension: None,
             external_subscriber_number: None,
-            facility,
+            facility: None,
             dm_ms_address: None,
             proprietary: None,
         };
@@ -782,12 +812,12 @@ impl CcBsSubentity {
         sdu.seek(0);
 
         let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
-        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, None);
+        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, Some(usage));
         queue.push_back(msg);
     }
 
     /// Send D-TX CEASED via FACCH stealing on the group traffic channel.
-    pub(super) fn send_d_tx_ceased_facch(&mut self, queue: &mut MessageQueue, call_id: u16, dest_gssi: u32, ts: u8) {
+    pub(super) fn send_d_tx_ceased_facch(&mut self, queue: &mut MessageQueue, call_id: u16, dest_gssi: u32, ts: u8, usage: u8) {
         let pdu = DTxCeased {
             call_identifier: call_id,
             transmission_request_permission: false, // ETSI 14.8.43: 0 = allowed to request transmission
@@ -803,21 +833,30 @@ impl CcBsSubentity {
         sdu.seek(0);
 
         let dest_addr = TetraAddress::new(dest_gssi, SsiType::Gssi);
-        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, None);
+        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, Some(usage));
         queue.push_back(msg);
     }
 
     /// Release a group call: send D-RELEASE, close circuit, clean up state.
     pub(super) fn release_group_call(&mut self, queue: &mut MessageQueue, call_id: u16, disconnect_cause: DisconnectCause) {
-        let Some(cached) = self.cached_setups.get(&call_id) else {
-            tracing::error!("No cached D-SETUP for call_id={}", call_id);
-            return;
-        };
-        let dest_addr = cached.dest_addr;
+        let cached = self.cached_setups.get(&call_id);
+        let fallback_dest = self
+            .active_calls
+            .get(&call_id)
+            .map(|call| TetraAddress::new(call.dest_gssi, SsiType::Gssi));
+        let dest_addr = cached.map(|cached| cached.dest_addr).or(fallback_dest);
 
-        let sdu = Self::build_d_release_from_d_setup(&cached.pdu, disconnect_cause);
-        let prim = Self::build_sapmsg(sdu, None, dest_addr, Layer2Service::Unacknowledged, None);
-        queue.push_back(prim);
+        if let Some(dest_addr) = dest_addr {
+            let sdu = cached
+                .map(|cached| Self::build_d_release_from_d_setup(&cached.pdu, disconnect_cause))
+                .unwrap_or_else(|| Self::build_d_release(call_id, disconnect_cause));
+            let prim = Self::build_sapmsg(sdu, None, dest_addr, Layer2Service::Unacknowledged, None);
+            queue.push_back(prim);
+        } else {
+            tracing::error!("No cached D-SETUP or active group call for call_id={}", call_id);
+            self.cached_setups.remove(&call_id);
+            return;
+        }
 
         if let Some(call) = self.active_calls.get(&call_id) {
             // Extract all needed fields before any mutable borrow (release_timeslot).

@@ -141,6 +141,23 @@ impl BsDefrag {
         Some(buf)
     }
 
+    /// Returns the only active SSI for this timeslot, if there is exactly one.
+    /// This is used as a conservative recovery path for historical/common-access
+    /// fragmented bursts that do not have an uplink grant owner in the scheduler.
+    pub fn single_active_ssi(&self, t: TdmaTime) -> Option<u32> {
+        let ts = (t.t - 1) as usize;
+        let mut active_ssis = self.buffers[ts]
+            .iter()
+            .filter_map(|(ssi, buf)| (buf.state == DefragBufferState::Active).then_some(*ssi));
+
+        let only = active_ssis.next()?;
+        if active_ssis.next().is_some() {
+            return None;
+        }
+
+        Some(only)
+    }
+
     /// Retrieves a read-only reference to the AIE info associated with a DefragBuffer
     pub fn get_aie_info(&self, ssi: u32, t: TdmaTime) -> Option<&Todo> {
         let ts = (t.t - 1) as usize;

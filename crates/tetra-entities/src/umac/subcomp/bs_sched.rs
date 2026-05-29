@@ -33,7 +33,7 @@ use crate::{
 };
 
 /// We submit this many TX timeslots ahead of the current time
-pub const MACSCHED_TX_AHEAD: usize = 1;
+pub const MACSCHED_TX_AHEAD: usize = 2;
 
 // We schedule up to this many frames ahead
 pub const MACSCHED_NUM_FRAMES: usize = 18;
@@ -46,6 +46,9 @@ pub const TCH_S_CAP: usize = 274;
 
 /// Number of timeslots the scheduler operates on. May become larger when secondary carriers are supported.
 pub const NUM_TIMESLOTS: usize = 4;
+
+const DL_QUEUE_MAX_DEPTH_PER_SLOT: usize = 64;
+const DL_FAIRNESS_BURST_LIMIT: u8 = 3;
 
 #[derive(Debug)]
 pub struct PrecomputedUmacPdus {
@@ -68,11 +71,12 @@ pub struct BsChannelScheduler {
     pub cur_dltime: TdmaTime,
     scrambling_code: u32,
     precomps: PrecomputedUmacPdus,
-    /// Collect dltx traffic here that can't be sent this slot.
-    /// Swapped back into the dltx_queues method at the end of the tick.
-    dltx_next_slot_queue: Vec<DlSchedElem>,
+    /// Collect DL traffic here that can't be sent in this frame, one queue per timeslot.
+    /// Merged back into the same timeslot queue at the end of that slot's scheduling pass.
+    dltx_next_frame_queues: [Vec<DlSchedElem>; 4],
     /// Four queues for scheduled downlink traffic, one per timeslot
     dltx_queues: [Vec<DlSchedElem>; 4],
+    dl_frag_slots_since_resource: [u8; 4],
     ulsched: [[TimeslotSchedule; MACSCHED_NUM_FRAMES]; 4],
 
     circuits: CircuitMgr,
@@ -140,8 +144,9 @@ impl BsChannelScheduler {
             cur_dltime: TdmaTime { t: 0, f: 0, m: 0, h: 0 }, // Intentionally invalid, updated in tick function
             scrambling_code,
             precomps,
-            dltx_next_slot_queue: Vec::new(),
+            dltx_next_frame_queues: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
             dltx_queues: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+            dl_frag_slots_since_resource: [0; 4],
             ulsched: EMPTY_SCHED,
             circuits: CircuitMgr::new(),
             hangtime: [false, false, false, false],
@@ -149,6 +154,66 @@ impl BsChannelScheduler {
             mcch_chan_alloc_sent_this_frame: false,
             ee_windows: HashMap::new(),
         }
+    }
+
+    fn slot_index(ts: u8, context: &str) -> Option<usize> {
+        if (1..=NUM_TIMESLOTS as u8).contains(&ts) {
+            Some(ts as usize - 1)
+        } else {
+            tracing::warn!("BsChannelScheduler::{}: invalid timeslot {}", context, ts);
+            None
+        }
+    }
+
+    fn discard_dl_sched_elem(&mut self, timeslot: u8, elem: DlSchedElem, reason: &str) {
+        tracing::warn!(
+            "BsChannelScheduler: dropping DL sched elem on ts {}: {}: {:?}",
+            timeslot,
+            reason,
+            elem
+        );
+        match elem {
+            DlSchedElem::Resource(_, _, Some(tx_reporter)) | DlSchedElem::Stealing(_, Some(tx_reporter)) => {
+                tx_reporter.mark_discarded();
+            }
+            DlSchedElem::RandomAccessAck(addr) => {
+                if let Some(slot) = Self::slot_index(timeslot, "discard_dl_sched_elem") {
+                    if !self.pending_ra_acks[slot].contains(&addr.ssi) {
+                        self.pending_ra_acks[slot].push(addr.ssi);
+                    }
+                }
+            }
+            DlSchedElem::FragBuf(_) => {}
+            DlSchedElem::Grant(..) | DlSchedElem::Broadcast(_) | DlSchedElem::Resource(_, _, None) | DlSchedElem::Stealing(_, None) => {}
+        }
+    }
+
+    fn enqueue_dl_sched_elem(&mut self, timeslot: u8, elem: DlSchedElem) -> bool {
+        let Some(slot) = Self::slot_index(timeslot, "enqueue_dl_sched_elem") else {
+            self.discard_dl_sched_elem(timeslot, elem, "invalid timeslot");
+            return false;
+        };
+
+        if self.dltx_queues[slot].len() >= DL_QUEUE_MAX_DEPTH_PER_SLOT {
+            self.discard_dl_sched_elem(timeslot, elem, "per-slot queue depth exceeded");
+            return false;
+        }
+
+        self.dltx_queues[slot].push(elem);
+        true
+    }
+
+    fn enqueue_dl_sched_elem_next_frame(&mut self, timeslot: u8, elem: DlSchedElem) -> bool {
+        let Some(slot) = Self::slot_index(timeslot, "enqueue_dl_sched_elem_next_frame") else {
+            self.discard_dl_sched_elem(timeslot, elem, "invalid next-frame timeslot");
+            return false;
+        };
+        if self.dltx_next_frame_queues[slot].len() >= DL_QUEUE_MAX_DEPTH_PER_SLOT {
+            self.discard_dl_sched_elem(timeslot, elem, "next-frame queue depth exceeded");
+            return false;
+        }
+        self.dltx_next_frame_queues[slot].push(elem);
+        true
     }
 
     /// Enter/leave hangtime for a traffic timeslot (2..=4).
@@ -176,11 +241,13 @@ impl BsChannelScheduler {
     }
 
     pub fn is_hangtime(&self, ts: u8) -> bool {
-        self.hangtime[ts as usize - 1]
+        Self::slot_index(ts, "is_hangtime").map(|slot| self.hangtime[slot]).unwrap_or(false)
     }
 
     fn is_hangtime_effective(&self, ts: u8) -> bool {
-        let idx = ts as usize - 1;
+        let Some(idx) = Self::slot_index(ts, "is_hangtime_effective") else {
+            return false;
+        };
         if !self.hangtime[idx] {
             return false;
         }
@@ -190,7 +257,9 @@ impl BsChannelScheduler {
     }
 
     fn has_pending_stealing(&self, ts: u8) -> bool {
-        let slot = ts as usize - 1;
+        let Some(slot) = Self::slot_index(ts, "has_pending_stealing") else {
+            return false;
+        };
         self.dltx_queues
             .get(slot)
             .map(|q| q.iter().any(|e| matches!(e, DlSchedElem::Stealing(..))))
@@ -305,6 +374,7 @@ impl BsChannelScheduler {
     /// Fully wipe the schedule
     pub fn purge_schedule(&mut self) {
         self.dltx_queues = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        self.dltx_next_frame_queues = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
         self.ulsched = EMPTY_SCHED;
     }
 
@@ -506,7 +576,7 @@ impl BsChannelScheduler {
     pub fn dl_enqueue_grant(&mut self, ts: u8, addr: TetraAddress, grant: BasicSlotgrant) {
         tracing::debug!("dl_enqueue_grant: ts {} enqueueing PDU {:?} for addr {}", ts, grant, addr);
         let elem = DlSchedElem::Grant(addr, grant);
-        self.dltx_queues[ts as usize - 1].push(elem);
+        self.enqueue_dl_sched_elem(ts, elem);
     }
 
     pub fn dl_enqueue_random_access_ack(&mut self, ts: u8, addr: TetraAddress) {
@@ -516,21 +586,24 @@ impl BsChannelScheduler {
             addr
         );
         let elem = DlSchedElem::RandomAccessAck(addr);
-        self.dltx_queues[ts as usize - 1].push(elem);
+        self.enqueue_dl_sched_elem(ts, elem);
     }
 
-    pub fn dl_enqueue_tma(&mut self, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) {
+    pub fn dl_enqueue_tma(&mut self, pdu: MacResource, sdu: BitBuffer, tx_reporter: Option<TxReporter>) -> bool {
         // Get all timeslots on which a relevant MS is listening
         // let timeslots: [u8; NUM_TIMESLOTS] = self.identify_timeslots_for_ssi(pdu.addr);
         tracing::trace!("identify_timeslots_for_ssi not implemented yet, defaulting to ts1");
         let timeslots: [u8; NUM_TIMESLOTS] = [1, 0, 0, 0];
+        let mut admitted = false;
 
         // Queue the message for all timeslots on which we should transmit this message.
         // The loop basically prevents cloning the last element.
         for i in 0..NUM_TIMESLOTS {
             let ts = timeslots[i];
             let next_ts = if i < NUM_TIMESLOTS - 1 { timeslots[i + 1] } else { 0 };
-            assert!(ts > 0);
+            if ts == 0 {
+                break;
+            }
 
             // If this PDU carries a chan_alloc element (DConnect/DConnectAck MCCH), check if we
             // already sent one this frame. DConnect MCCH (113 bits) + DConnectAck MCCH (110 bits)
@@ -557,27 +630,31 @@ impl BsChannelScheduler {
             if deferred {
                 tracing::debug!("dl_enqueue_tma: ts {} deferring chan_alloc PDU to next frame (slot capacity)", ts);
                 let elem = DlSchedElem::Resource(pdu, sdu, tx_reporter);
-                self.dltx_next_slot_queue.push(elem);
+                admitted |= self.enqueue_dl_sched_elem_next_frame(ts, elem);
                 break;
             } else if next_ts > 0 {
                 // There is another ts for which we need to transmit this message.
                 // Clone the message now and push it to the current ts.
                 let elem = DlSchedElem::Resource(pdu.clone(), sdu.clone(), tx_reporter.clone());
-                self.dltx_queues[ts as usize - 1].push(elem);
+                admitted |= self.enqueue_dl_sched_elem(ts, elem);
             } else {
                 // This is the last ts on which we need to transmit this message
                 let elem = DlSchedElem::Resource(pdu, sdu, tx_reporter);
-                self.dltx_queues[ts as usize - 1].push(elem);
+                admitted |= self.enqueue_dl_sched_elem(ts, elem);
                 break;
             }
         }
+        admitted
     }
 
     /// Consumes and returns true if a pending random access ack exists for the given SSI on
     /// this timeslot. Used when building STCH blocks so the MAC-RESOURCE can carry
     /// random_access_flag=true per ETSI 21.4.3.1.
     pub fn take_pending_ra_ack(&mut self, ts: u8, ssi: u32) -> bool {
-        let pending = &mut self.pending_ra_acks[ts as usize - 1];
+        let Some(slot) = Self::slot_index(ts, "take_pending_ra_ack") else {
+            return false;
+        };
+        let pending = &mut self.pending_ra_acks[slot];
         if let Some(pos) = pending.iter().position(|&s| s == ssi) {
             pending.remove(pos);
             true
@@ -586,17 +663,24 @@ impl BsChannelScheduler {
         }
     }
 
-    /// Enqueue a pre-built STCH block for FACCH/stealing on a traffic timeslot.
-    /// The block must be 124 type1 bits containing MAC-U-SIGNAL header + TM-SDU.
-    pub fn dl_enqueue_stealing(&mut self, ts: u8, block: BitBuffer, tx_reporter: Option<TxReporter>) {
-        tracing::info!("dl_enqueue_stealing: ts {} enqueueing STCH block ({} bits)", ts, block.get_len());
-        self.dltx_queues[ts as usize - 1].push(DlSchedElem::Stealing(block, tx_reporter));
+    pub fn has_pending_ra_ack(&self, ts: u8, ssi: u32) -> bool {
+        let Some(slot) = Self::slot_index(ts, "has_pending_ra_ack") else {
+            return false;
+        };
+        self.pending_ra_acks[slot].contains(&ssi)
     }
 
-    fn dl_enqueue_tma_frag_next_frame(&mut self, fragger: BsFragger) {
-        tracing::debug!("dl_enqueue_tma_frag_next_frame: enqueueing {:?}", fragger);
+    /// Enqueue a pre-built STCH block for FACCH/stealing on a traffic timeslot.
+    /// The block must be 124 type1 bits containing MAC-U-SIGNAL header + TM-SDU.
+    pub fn dl_enqueue_stealing(&mut self, ts: u8, block: BitBuffer, tx_reporter: Option<TxReporter>) -> bool {
+        tracing::info!("dl_enqueue_stealing: ts {} enqueueing STCH block ({} bits)", ts, block.get_len());
+        self.enqueue_dl_sched_elem(ts, DlSchedElem::Stealing(block, tx_reporter))
+    }
+
+    fn dl_enqueue_tma_frag_next_frame(&mut self, timeslot: u8, fragger: BsFragger) {
+        tracing::debug!("dl_enqueue_tma_frag_next_frame: ts {} enqueueing {:?}", timeslot, fragger);
         let elem = DlSchedElem::FragBuf(fragger);
-        self.dltx_next_slot_queue.push(elem);
+        self.enqueue_dl_sched_elem_next_frame(timeslot, elem);
     }
 
     /// Enqueue a TMA PDU to be transmitted on the NEXT frame (ts1, frame N+1).
@@ -609,7 +693,7 @@ impl BsChannelScheduler {
             sdu.dump_bin()
         );
         let elem = DlSchedElem::Resource(pdu, sdu, tx_reporter);
-        self.dltx_next_slot_queue.push(elem);
+        self.enqueue_dl_sched_elem_next_frame(1, elem);
     }
 
     pub fn dl_schedule_tmb(&mut self, _traffic: BitBuffer, _ts: &TdmaTime) {
@@ -727,7 +811,8 @@ impl BsChannelScheduler {
 
     /// Returns a mutable reference to the first scheduled resource for the given timeslot and address
     pub fn dl_get_scheduled_resource_for_ssi(&mut self, ts: TdmaTime, addr: &TetraAddress) -> Option<&mut DlSchedElem> {
-        let queue = &mut self.dltx_queues[ts.t as usize - 1];
+        let slot = Self::slot_index(ts.t, "dl_get_scheduled_resource_for_ssi")?;
+        let queue = &mut self.dltx_queues[slot];
 
         for index in 0..queue.len() {
             let elem = &mut queue[index];
@@ -765,7 +850,10 @@ impl BsChannelScheduler {
 
     /// Takes and removes all grants and random access acknowledgements from the given timeslot's queue, returning them as a vec.
     pub fn dl_take_all_grants_and_acks(&mut self, timeslot: u8) -> Vec<DlSchedElem> {
-        let queue = &mut self.dltx_queues[timeslot as usize - 1];
+        let Some(slot) = Self::slot_index(timeslot, "dl_take_all_grants_and_acks") else {
+            return Vec::new();
+        };
+        let queue = &mut self.dltx_queues[slot];
         let mut taken = Vec::new();
 
         let mut i = 0;
@@ -785,7 +873,10 @@ impl BsChannelScheduler {
     /// while keeping stealing blocks that may still need to be transmitted via FACCH.
     /// Discarded elements are reported as such via tx_reporter if available. Returns true if elements were discarded.
     pub fn dl_drop_all_except_stolen(&mut self, timeslot: u8) -> bool {
-        let queue = &mut self.dltx_queues[timeslot as usize - 1];
+        let Some(slot) = Self::slot_index(timeslot, "dl_drop_all_except_stolen") else {
+            return false;
+        };
+        let queue = &mut self.dltx_queues[slot];
         let mut i = 0;
         let mut item_was_discarded = false;
         while i < queue.len() {
@@ -813,7 +904,9 @@ impl BsChannelScheduler {
                     DlSchedElem::RandomAccessAck(addr) => {
                         // Save the SSI so the next STCH for this address can carry
                         // random_access_flag=true (ETSI 21.4.3.1)
-                        self.pending_ra_acks[timeslot as usize - 1].push(addr.ssi);
+                        if !self.pending_ra_acks[slot].contains(&addr.ssi) {
+                            self.pending_ra_acks[slot].push(addr.ssi);
+                        }
                     }
 
                     DlSchedElem::Grant(..) | DlSchedElem::Broadcast(_) => {
@@ -830,6 +923,9 @@ impl BsChannelScheduler {
     pub fn dl_integrate_sched_elems_for_timeslot(&mut self, ts: TdmaTime) {
         // Remove all grants and acks from queue and collect them into a vec
         let grants_and_acks = self.dl_take_all_grants_and_acks(ts.t);
+        if Self::slot_index(ts.t, "dl_integrate_sched_elems_for_timeslot").is_none() {
+            return;
+        }
 
         // Process grants and acks
         for elem in grants_and_acks {
@@ -886,7 +982,7 @@ impl BsChannelScheduler {
 
                     // Push new resource into the queue. These do not need a tx_reporter
                     let dlsched_res = DlSchedElem::Resource(pdu, BitBuffer::new(0), None);
-                    self.dltx_queues[ts.t as usize - 1].push(dlsched_res);
+                    self.enqueue_dl_sched_elem(ts.t, dlsched_res);
                 }
                 _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
             }
@@ -895,8 +991,11 @@ impl BsChannelScheduler {
 
     fn dl_build_block_from_signalling_schedule(&mut self, ts: TdmaTime) -> Option<BitBuffer> {
         let mut buf_opt = None;
+        let Some(slot) = Self::slot_index(ts.t, "dl_build_block_from_signalling_schedule") else {
+            return None;
+        };
 
-        while !self.dltx_queues[ts.t as usize - 1].is_empty() {
+        while !self.dltx_queues[slot].is_empty() {
             let opt = self.dl_take_prioritized_sched_item(ts);
 
             match opt {
@@ -914,7 +1013,7 @@ impl BsChannelScheduler {
                             if !fragger.get_next_chunk(&mut buf) {
                                 // Fragmentation was started and we have more chunks to send
                                 // Enqueue fragger with remaining data for retrieval next frame
-                                self.dl_enqueue_tma_frag_next_frame(fragger);
+                                self.dl_enqueue_tma_frag_next_frame(ts.t, fragger);
                             }
                             buf_opt = Some(buf);
                         }
@@ -925,7 +1024,7 @@ impl BsChannelScheduler {
                             if !fragger.get_next_chunk(&mut buf) {
                                 // Fragmentation was continued and we still have more chunks to send
                                 // Re-enqueue fragger with remaining data for retrieval next frame
-                                self.dl_enqueue_tma_frag_next_frame(fragger);
+                                self.dl_enqueue_tma_frag_next_frame(ts.t, fragger);
                             }
                             buf_opt = Some(buf);
                         }
@@ -953,17 +1052,21 @@ impl BsChannelScheduler {
             }
         }
 
-        // If any signalling could not be sent this slot, it should be in the next slot queue.
-        // Drain next_slot_queue into the front of the current slot queue so deferred PDUs are
-        // sent before any newly-arriving ones in the next frame.  Using extend instead of swap
-        // avoids a panic when the current queue already contains items (e.g. two back-to-back
-        // P2P calls each deferring a chan_alloc PDU within the same tick).
-        if !self.dltx_next_slot_queue.is_empty() {
-            let current = &mut self.dltx_queues[ts.t as usize - 1];
+        // If any signalling could not be sent this slot, it should stay bound to this
+        // same timeslot in the next frame. Prepend deferred items so they are sent before
+        // newly-arriving ones without migrating traffic across slots.
+        if !self.dltx_next_frame_queues[slot].is_empty() {
             // Prepend: move deferred items to front, then re-append any items already queued.
-            let mut merged = std::mem::take(&mut self.dltx_next_slot_queue);
-            merged.extend(current.drain(..));
-            *current = merged;
+            let mut merged = std::mem::take(&mut self.dltx_next_frame_queues[slot]);
+            let current = std::mem::take(&mut self.dltx_queues[slot]);
+            merged.extend(current);
+            if merged.len() > DL_QUEUE_MAX_DEPTH_PER_SLOT {
+                let overflow = merged.split_off(DL_QUEUE_MAX_DEPTH_PER_SLOT);
+                for elem in overflow {
+                    self.discard_dl_sched_elem(ts.t, elem, "merged queue depth exceeded");
+                }
+            }
+            self.dltx_queues[slot] = merged;
         }
 
         buf_opt
@@ -974,6 +1077,9 @@ impl BsChannelScheduler {
     /// - stch_block: STCH signaling (124 bits) for FACCH stealing (EN 300 392-2, clause 23.5)
     /// Also reports transmission, if a TxReporter was attached to the DlSchedElem::Stealing element
     fn dl_build_traffic_block(&mut self, ts: TdmaTime) -> (BitBuffer, Option<BitBuffer>) {
+        let Some(slot) = Self::slot_index(ts.t, "dl_build_traffic_block") else {
+            return (BitBuffer::new(TCH_S_CAP), None);
+        };
         // Get speech data or silence
         let tch_buf = if let Some(block) = self.circuits.take_block(ts.t) {
             let mut buf = BitBuffer::from_vec(block);
@@ -989,7 +1095,7 @@ impl BsChannelScheduler {
 
         // Check for FACCH/stealing: take a queued Stealing item (highest priority signaling)
         let (stch_opt, tx_reporter_opt) = {
-            let q = &mut self.dltx_queues[ts.t as usize - 1];
+            let q = &mut self.dltx_queues[slot];
             if let Some(i) = q.iter().position(|e| matches!(e, DlSchedElem::Stealing(..))) {
                 match q.remove(i) {
                     DlSchedElem::Stealing(buf, tx_reporter) => (Some(buf), tx_reporter),
@@ -1001,7 +1107,7 @@ impl BsChannelScheduler {
         };
 
         // Warn about other queued signaling that can't be sent via stealing yet
-        if stch_opt.is_none() && !self.dltx_queues[ts.t as usize - 1].is_empty() {
+        if stch_opt.is_none() && !self.dltx_queues[slot].is_empty() {
             tracing::warn!("dl_build_traffic_block: queued signaling on ts {} but no stealing item", ts.t);
         }
 
@@ -1024,7 +1130,18 @@ impl BsChannelScheduler {
         }
 
         // Map 1-based ts to 0-based index, bail on 0 or out of range.
-        let slot = ts.t as usize - 1;
+        let slot = Self::slot_index(ts.t, "dl_take_prioritized_sched_item")?;
+
+        let resource_index = self.dltx_queues[slot].iter().position(|e| match e {
+            DlSchedElem::Resource(pdu, _, _) => self.resource_is_ee_eligible(pdu, ts),
+            _ => false,
+        });
+        if self.dl_frag_slots_since_resource[slot] >= DL_FAIRNESS_BURST_LIMIT
+            && let Some(i) = resource_index
+        {
+            self.dl_frag_slots_since_resource[slot] = 0;
+            return Some(self.dltx_queues[slot].remove(i));
+        }
 
         // Return grants first
         if let Some(i) = self.dltx_queues[slot].iter().position(|e| matches!(e, DlSchedElem::Grant(_, _))) {
@@ -1036,14 +1153,13 @@ impl BsChannelScheduler {
             DlSchedElem::FragBuf(fragger) => self.fragger_is_ee_eligible(fragger, ts),
             _ => false,
         }) {
+            self.dl_frag_slots_since_resource[slot] = self.dl_frag_slots_since_resource[slot].saturating_add(1);
             return Some(self.dltx_queues[slot].remove(i));
         }
 
         // Return Resources last
-        if let Some(i) = self.dltx_queues[slot].iter().position(|e| match e {
-            DlSchedElem::Resource(pdu, _, _) => self.resource_is_ee_eligible(pdu, ts),
-            _ => false,
-        }) {
+        if let Some(i) = resource_index {
+            self.dl_frag_slots_since_resource[slot] = 0;
             return Some(self.dltx_queues[slot].remove(i));
         }
 
@@ -1187,12 +1303,16 @@ impl BsChannelScheduler {
         };
 
         // Sanity check: frame 18 should not carry user blocks
-        if elem.blk1.is_some() {
-            assert!(ts.f != 18, "frame 18 shouldn't have blk1 set");
+        if elem.blk1.is_some() && ts.f == 18 {
+            tracing::warn!("finalize_ts_for_tick: dropping scheduled user block on frame 18 ts {}", ts.t);
+            elem.blk1 = None;
+            elem.blk2 = None;
         }
 
         // Construct the BBK block to reflect UL/DL usage
-        assert!(elem.bbk.is_none(), "BBK block already set");
+        if elem.bbk.is_some() {
+            tracing::warn!("finalize_ts_for_tick: BBK block already set for {}, replacing", ts);
+        }
         elem.bbk = Some(self.generate_bbk_block(ts));
 
         // tracing::trace!("finalize_ts_for_tick: have {}{}{}",
@@ -1210,37 +1330,71 @@ impl BsChannelScheduler {
 
         if blk1_lchan == LogicalChannel::Stch {
             // FACCH/Stealing: blk1 = STCH signaling, blk2 = TCH speech (already set above)
-            assert!(elem.blk2.is_some(), "STCH blk1 must have blk2 (TCH half-slot)");
+            if elem.blk2.is_none() {
+                tracing::warn!("finalize_ts_for_tick: STCH blk1 missing blk2 on {}, falling back to idle SCH/F", ts);
+                elem.blk1 = Some(TmvUnitdataReq {
+                    logical_channel: LogicalChannel::SchF,
+                    mac_block: self.generate_hangtime_idle_schf(),
+                    scrambling_code: self.scrambling_code,
+                });
+            }
         } else if elem.blk2.is_none() && (blk1_lchan == LogicalChannel::Bsch || blk1_lchan == LogicalChannel::SchHd) {
             // Populate blk2 with SYSINFO if blk1 is half-slot (not STCH)
             // Check blk1 is indeed short (124 for half-slot or 60 for SYNC)
-            assert!(elem.blk1.as_ref().unwrap().mac_block.get_len() <= 124);
-
-            let mut buf = BitBuffer::new(124);
-
-            // Write MAC-SYSINFO (alternating sysinfo1/sysinfo2), followed by MLE-SYSINFO
-            if ts.t % 2 == 1 {
-                self.precomps.mac_sysinfo1.to_bitbuf(&mut buf);
+            if elem.blk1.as_ref().unwrap().mac_block.get_len() > 124 {
+                tracing::warn!(
+                    "finalize_ts_for_tick: half-slot block too long on {}, replacing with idle SCH/F",
+                    ts
+                );
+                elem.blk1 = Some(TmvUnitdataReq {
+                    logical_channel: LogicalChannel::SchF,
+                    mac_block: self.generate_hangtime_idle_schf(),
+                    scrambling_code: self.scrambling_code,
+                });
             } else {
-                self.precomps.mac_sysinfo2.to_bitbuf(&mut buf);
-            }
-            self.precomps.mle_sysinfo.to_bitbuf(&mut buf);
+                let mut buf = BitBuffer::new(124);
 
-            elem.blk2 = Some(TmvUnitdataReq {
-                logical_channel: LogicalChannel::Bnch,
-                mac_block: buf,
-                scrambling_code: self.scrambling_code,
-            })
+                // Write MAC-SYSINFO (alternating sysinfo1/sysinfo2), followed by MLE-SYSINFO
+                if ts.t % 2 == 1 {
+                    self.precomps.mac_sysinfo1.to_bitbuf(&mut buf);
+                } else {
+                    self.precomps.mac_sysinfo2.to_bitbuf(&mut buf);
+                }
+                self.precomps.mle_sysinfo.to_bitbuf(&mut buf);
+
+                elem.blk2 = Some(TmvUnitdataReq {
+                    logical_channel: LogicalChannel::Bnch,
+                    mac_block: buf,
+                    scrambling_code: self.scrambling_code,
+                })
+            }
         } else if elem.blk2.is_none() {
             // Full-slot block (TCH or SCH/F): just verify it fills both half slots
-            assert!(
-                elem.blk1.as_ref().unwrap().mac_block.get_len() >= 268,
-                "blk1 should be full-slot but is too short"
-            );
+            if elem.blk1.as_ref().unwrap().mac_block.get_len() < 268 {
+                tracing::warn!(
+                    "finalize_ts_for_tick: full-slot blk1 too short on {}, replacing with idle SCH/F",
+                    ts
+                );
+                elem.blk1 = Some(TmvUnitdataReq {
+                    logical_channel: LogicalChannel::SchF,
+                    mac_block: self.generate_hangtime_idle_schf(),
+                    scrambling_code: self.scrambling_code,
+                });
+            }
         }
 
-        assert!(elem.bbk.is_some(), "BBK block is not set, this should not happen");
-        assert!(elem.blk1.is_some(), "blk1 block is not set, this should not happen");
+        if elem.bbk.is_none() {
+            tracing::error!("finalize_ts_for_tick: BBK block missing on {}, inserting empty AACH", ts);
+            elem.bbk = Some(TmvUnitdataReq {
+                logical_channel: LogicalChannel::Aach,
+                mac_block: BitBuffer::new(14),
+                scrambling_code: self.scrambling_code,
+            });
+        }
+        if elem.blk1.is_none() {
+            tracing::error!("finalize_ts_for_tick: blk1 missing on {}, inserting default block", ts);
+            elem.blk1 = Some(self.generate_default_blks(ts));
+        }
 
         // If signalling channels are here, and there is spare room, we need to close them with a Null pdu
         elem.blk1 = self.try_add_null_pdus(elem.blk1);
@@ -1285,8 +1439,13 @@ impl BsChannelScheduler {
 
             match ts.t {
                 1 => {
-                    assert!(dl_traffic_usage.is_none(), "DL ts 1 can't be traffic");
-                    assert!(ul_traffic_usage.is_none(), "UL ts 1 can't be traffic (is this allowed?"); // TODO FIXME check spec
+                    if dl_traffic_usage.is_some() || ul_traffic_usage.is_some() {
+                        tracing::error!(
+                            "UMAC: generate_bbk_block: refusing traffic usage on TS1 (dl={:?}, ul={:?})",
+                            dl_traffic_usage,
+                            ul_traffic_usage
+                        );
+                    }
 
                     // Always CommonOnly on TS1 (MCCH). Per ETSI 23.5.2.2.2, the MS
                     // with a grant transmits in granted slots without checking the AACH.
@@ -1345,7 +1504,13 @@ impl BsChannelScheduler {
             aach.to_bitbuf(&mut aach_bb);
         } else {
             // Fr18
-            assert!(ul_traffic_usage.is_none() && dl_traffic_usage.is_none());
+            if ul_traffic_usage.is_some() || dl_traffic_usage.is_some() {
+                tracing::error!(
+                    "UMAC: generate_bbk_block: refusing traffic usage on frame 18 (dl={:?}, ul={:?})",
+                    dl_traffic_usage,
+                    ul_traffic_usage
+                );
+            }
             let aach = AccessAssignFr18 {
                 ul_usage: AccessAssignUlUsage::CommonOnly,
                 f1_af1: Some(AccessField {
@@ -1493,6 +1658,9 @@ mod tests {
             pdus::{mac_sync::MacSync, mac_sysinfo::MacSysinfo},
         },
     };
+    use tetra_saps::control::{call_control::CircuitDlMediaSource, enums::circuit_mode_type::CircuitModeType};
+
+    use crate::umac::subcomp::bs_frag::BsFragger;
 
     use super::*;
 
@@ -1734,6 +1902,70 @@ mod tests {
         };
         assert!(pdu.random_access_flag);
         assert!(pdu.slot_granting_element.is_some());
+    }
+
+    #[test]
+    fn test_create_circuit_refuses_ts1_and_out_of_range() {
+        let mut sched = get_testing_slotter();
+        let circuit = |ts| Circuit {
+            direction: Direction::Dl,
+            ts,
+            peer_ts: None,
+            usage: 4,
+            circuit_mode: CircuitModeType::TchS,
+            speech_service: Some(0),
+            etee_encrypted: false,
+            dl_media_source: CircuitDlMediaSource::LocalLoopback,
+        };
+
+        sched.create_circuit(Direction::Dl, circuit(1));
+        assert!(!sched.circuit_is_active(Direction::Dl, 1));
+
+        sched.create_circuit(Direction::Dl, circuit(5));
+        assert!(!sched.circuit_is_active(Direction::Dl, 5));
+
+        sched.create_circuit(Direction::Dl, circuit(2));
+        assert!(sched.circuit_is_active(Direction::Dl, 2));
+    }
+
+    #[test]
+    fn test_downlink_queue_depth_is_capped_per_slot() {
+        let mut sched = get_testing_slotter();
+        let addr = TetraAddress {
+            ssi_type: SsiType::Issi,
+            ssi: 1234,
+        };
+
+        for _ in 0..(DL_QUEUE_MAX_DEPTH_PER_SLOT + 1) {
+            let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+            sched.dl_enqueue_tma(pdu, BitBuffer::new(0), None);
+        }
+
+        assert_eq!(sched.dltx_queues[0].len(), DL_QUEUE_MAX_DEPTH_PER_SLOT);
+    }
+
+    #[test]
+    fn test_resource_ages_past_fragment_burst() {
+        let mut sched = get_testing_slotter();
+        let ts = TdmaTime { t: 1, f: 1, m: 1, h: 0 };
+        let addr = TetraAddress {
+            ssi_type: SsiType::Issi,
+            ssi: 1234,
+        };
+
+        for _ in 0..DL_FAIRNESS_BURST_LIMIT {
+            let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+            let fragger = BsFragger::new(pdu, BitBuffer::from_bitstr(&"1".repeat(SCH_F_CAP * 2)), None);
+            sched.dltx_queues[0].push(DlSchedElem::FragBuf(fragger));
+        }
+        let pdu = BsChannelScheduler::dl_make_minimal_resource(&addr, None, false);
+        sched.dltx_queues[0].push(DlSchedElem::Resource(pdu, BitBuffer::new(0), None));
+        sched.dl_frag_slots_since_resource[0] = DL_FAIRNESS_BURST_LIMIT;
+
+        assert!(matches!(
+            sched.dl_take_prioritized_sched_item(ts),
+            Some(DlSchedElem::Resource(_, _, _))
+        ));
     }
 
     #[test]

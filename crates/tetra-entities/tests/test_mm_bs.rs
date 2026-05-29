@@ -6,9 +6,13 @@ use tetra_core::{BitBuffer, Sap, SsiType, TdmaTime, TetraAddress, debug};
 use tetra_pdus::mm::enums::energy_saving_mode::EnergySavingMode;
 use tetra_pdus::mm::enums::location_update_type::LocationUpdateType;
 use tetra_pdus::mm::enums::mm_pdu_type_dl::MmPduTypeDl;
+use tetra_pdus::mm::fields::group_identity_location_demand::GroupIdentityLocationDemand;
+use tetra_pdus::mm::fields::group_identity_uplink::GroupIdentityUplink;
 use tetra_pdus::mm::pdus::d_location_update_accept::DLocationUpdateAccept;
 use tetra_pdus::mm::pdus::d_mm_status::DMmStatus;
+use tetra_pdus::mm::pdus::u_attach_detach_group_identity::UAttachDetachGroupIdentity;
 use tetra_pdus::mm::pdus::u_location_update_demand::ULocationUpdateDemand;
+use tetra_saps::control::brew::{BrewSubscriberAction, MmSubscriberUpdate};
 use tetra_saps::lmm::LmmMleUnitdataInd;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
 
@@ -17,6 +21,15 @@ use crate::common::ComponentTest;
 const TEST_ISSI: u32 = 2260082;
 
 fn make_location_update_msg(issi: u32, handle: u32, location_update_type: LocationUpdateType) -> SapMsg {
+    make_location_update_msg_with_group_demand(issi, handle, location_update_type, None)
+}
+
+fn make_location_update_msg_with_group_demand(
+    issi: u32,
+    handle: u32,
+    location_update_type: LocationUpdateType,
+    group_identity_location_demand: Option<GroupIdentityLocationDemand>,
+) -> SapMsg {
     let pdu = ULocationUpdateDemand {
         location_update_type,
         request_to_append_la: false,
@@ -27,7 +40,7 @@ fn make_location_update_msg(issi: u32, handle: u32, location_update_type: Locati
         la_information: None,
         ssi: None,
         address_extension: None,
-        group_identity_location_demand: None,
+        group_identity_location_demand,
         group_report_response: None,
         authentication_uplink: None,
         extended_capabilities: None,
@@ -47,6 +60,47 @@ fn make_location_update_msg(issi: u32, handle: u32, location_update_type: Locati
             received_address: TetraAddress::issi(issi),
         }),
     }
+}
+
+fn make_attach_group_msg(issi: u32, handle: u32, gssi: u32) -> SapMsg {
+    let pdu = UAttachDetachGroupIdentity {
+        group_identity_report: false,
+        group_identity_attach_detach_mode: false,
+        group_report_response: None,
+        group_identity_uplink: Some(vec![GroupIdentityUplink {
+            class_of_usage: Some(0),
+            group_identity_detachment_uplink: None,
+            gssi: Some(gssi),
+            address_extension: None,
+            vgssi: None,
+        }]),
+        proprietary: None,
+    };
+    let mut sdu = BitBuffer::new_autoexpand(32);
+    pdu.to_bitbuf(&mut sdu).unwrap();
+    sdu.seek(0);
+
+    SapMsg {
+        sap: Sap::LmmSap,
+        src: TetraEntity::Mle,
+        dest: TetraEntity::Mm,
+        msg: SapMsgInner::LmmMleUnitdataInd(LmmMleUnitdataInd {
+            sdu,
+            handle,
+            received_address: TetraAddress::issi(issi),
+        }),
+    }
+}
+
+fn subscriber_updates(msgs: &[SapMsg]) -> Vec<MmSubscriberUpdate> {
+    msgs.iter()
+        .filter_map(|msg| {
+            let SapMsgInner::MmSubscriberUpdate(update) = &msg.msg else {
+                return None;
+            };
+            Some(update.clone())
+        })
+        .collect()
 }
 
 fn lmm_downlink_pdu_types(msgs: &[SapMsg]) -> Vec<MmPduTypeDl> {
@@ -196,6 +250,236 @@ fn test_brew_reconnected_emits_location_update_command_for_registered_ms() {
     test.run_stack(Some(1));
     let command_msgs = test.dump_sinks();
     assert_eq!(lmm_downlink_pdu_types(&command_msgs), vec![MmPduTypeDl::DLocationUpdateCommand]);
+}
+
+#[test]
+fn test_roaming_location_update_preserves_group_affiliation_without_group_replace() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 17, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+
+    test.submit_message(make_attach_group_msg(TEST_ISSI, 17, 91));
+    test.run_stack(Some(1));
+    let attach_msgs = test.dump_sinks();
+    assert!(
+        subscriber_updates(&attach_msgs)
+            .iter()
+            .any(|update| update.issi == TEST_ISSI && update.action == BrewSubscriberAction::Affiliate && update.groups == vec![91]),
+        "initial group attach must affiliate GSSI 91"
+    );
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 18, LocationUpdateType::RoamingLocationUpdating));
+    test.run_stack(Some(1));
+    let refresh_msgs = test.dump_sinks();
+    let updates = subscriber_updates(&refresh_msgs);
+
+    assert!(
+        !updates.iter().any(|update| update.issi == TEST_ISSI
+            && matches!(update.action, BrewSubscriberAction::Deregister | BrewSubscriberAction::Deaffiliate)),
+        "roaming LU without a valid group replace must not transiently remove TG91"
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|update| update.issi == TEST_ISSI && update.action == BrewSubscriberAction::Register && update.groups.is_empty()),
+        "roaming LU should refresh registration without disturbing current affiliations"
+    );
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+}
+
+#[test]
+fn test_roaming_location_update_mode1_without_uplink_rejects_without_losing_affiliation() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 17, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+
+    test.submit_message(make_attach_group_msg(TEST_ISSI, 17, 91));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+
+    test.submit_message(make_location_update_msg_with_group_demand(
+        TEST_ISSI,
+        18,
+        LocationUpdateType::RoamingLocationUpdating,
+        Some(GroupIdentityLocationDemand {
+            group_identity_attach_detach_mode: 1,
+            group_identity_uplink: None,
+        }),
+    ));
+    test.run_stack(Some(1));
+    let refresh_msgs = test.dump_sinks();
+    let updates = subscriber_updates(&refresh_msgs);
+
+    assert!(
+        !updates
+            .iter()
+            .any(|update| update.issi == TEST_ISSI && update.action == BrewSubscriberAction::Deaffiliate && update.groups == vec![91]),
+        "mode=1 without GroupIdentityUplink is unsupported and must not detach the prior GSSI"
+    );
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+}
+
+#[test]
+fn test_roaming_group_replace_with_unsupported_identity_rejects_without_losing_tg91() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 17, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+
+    test.submit_message(make_attach_group_msg(TEST_ISSI, 17, 91));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+
+    test.submit_message(make_location_update_msg_with_group_demand(
+        TEST_ISSI,
+        18,
+        LocationUpdateType::RoamingLocationUpdating,
+        Some(GroupIdentityLocationDemand {
+            group_identity_attach_detach_mode: 1,
+            group_identity_uplink: Some(vec![GroupIdentityUplink {
+                class_of_usage: Some(0),
+                group_identity_detachment_uplink: None,
+                gssi: Some(91),
+                address_extension: Some(901999),
+                vgssi: None,
+            }]),
+        }),
+    ));
+    test.run_stack(Some(1));
+    let refresh_msgs = test.dump_sinks();
+    let updates = subscriber_updates(&refresh_msgs);
+    let accept = first_location_update_accept(&refresh_msgs);
+    let gila = accept
+        .group_identity_location_accept
+        .expect("expected explicit group identity response");
+
+    assert_eq!(
+        gila.group_identity_accept_reject, 1,
+        "unsupported group identity replace must be rejected"
+    );
+    assert!(
+        !updates.iter().any(|update| update.issi == TEST_ISSI
+            && matches!(update.action, BrewSubscriberAction::Deregister | BrewSubscriberAction::Deaffiliate)),
+        "roaming cleanup must not remove TG91 after rejecting unsupported replacement"
+    );
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+}
+
+#[test]
+fn test_roaming_group_replace_with_mixed_identity_list_rejects_without_losing_tg91() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 17, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+
+    test.submit_message(make_attach_group_msg(TEST_ISSI, 17, 91));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+
+    test.submit_message(make_location_update_msg_with_group_demand(
+        TEST_ISSI,
+        18,
+        LocationUpdateType::RoamingLocationUpdating,
+        Some(GroupIdentityLocationDemand {
+            group_identity_attach_detach_mode: 1,
+            group_identity_uplink: Some(vec![
+                GroupIdentityUplink {
+                    class_of_usage: Some(0),
+                    group_identity_detachment_uplink: None,
+                    gssi: Some(226777),
+                    address_extension: None,
+                    vgssi: None,
+                },
+                GroupIdentityUplink {
+                    class_of_usage: Some(0),
+                    group_identity_detachment_uplink: None,
+                    gssi: Some(91),
+                    address_extension: Some(901999),
+                    vgssi: None,
+                },
+            ]),
+        }),
+    ));
+    test.run_stack(Some(1));
+    let refresh_msgs = test.dump_sinks();
+    let updates = subscriber_updates(&refresh_msgs);
+    let accept = first_location_update_accept(&refresh_msgs);
+    let gila = accept
+        .group_identity_location_accept
+        .expect("expected explicit group identity response");
+
+    assert_eq!(
+        gila.group_identity_accept_reject, 1,
+        "mixed supported/unsupported group replace must be rejected atomically"
+    );
+    assert!(
+        !updates.iter().any(|update| update.issi == TEST_ISSI
+            && matches!(update.action, BrewSubscriberAction::Deregister | BrewSubscriberAction::Deaffiliate)),
+        "mixed unsupported replace must not transiently remove TG91"
+    );
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+}
+
+#[test]
+fn test_known_itsi_attach_restores_prior_group_affiliation() {
+    debug::setup_logging_verbose();
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Mm], vec![TetraEntity::Mle, TetraEntity::Cmce]);
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 17, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+
+    test.submit_message(make_attach_group_msg(TEST_ISSI, 17, 91));
+    test.run_stack(Some(1));
+    let _ = test.dump_sinks();
+    assert!(test.config.state_read().subscribers.has_group_members(91));
+
+    test.submit_message(make_location_update_msg(TEST_ISSI, 18, LocationUpdateType::ItsiAttach));
+    test.run_stack(Some(1));
+    let reattach_msgs = test.dump_sinks();
+    let updates = subscriber_updates(&reattach_msgs);
+
+    assert!(
+        updates
+            .iter()
+            .any(|update| update.issi == TEST_ISSI && update.action == BrewSubscriberAction::Register && update.groups.is_empty()),
+        "known ItsiAttach should still refresh Brew/CMCE registration"
+    );
+    assert!(
+        updates
+            .iter()
+            .any(|update| update.issi == TEST_ISSI && update.action == BrewSubscriberAction::Affiliate && update.groups == vec![91]),
+        "known ItsiAttach must restore prior TG91 affiliation after registry re-register"
+    );
+    assert!(test.config.state_read().subscribers.has_group_members(91));
 }
 
 #[test]

@@ -43,12 +43,13 @@ impl CcBsSubentity {
         }
     }
 
-    fn fsm_send_d_tx_granted_individual(
+    pub(in crate::cmce::subentities::cc_bs) fn fsm_send_d_tx_granted_individual(
         &self,
         queue: &mut MessageQueue,
         call_id: u16,
         target_addr: TetraAddress,
         ts: u8,
+        usage: u8,
         transmission_grant: TransmissionGrant,
         transmitting_party_issi: Option<u32>,
     ) {
@@ -63,7 +64,7 @@ impl CcBsSubentity {
             transmitting_party_address_ssi: transmitting_party_issi.map(|ssi| ssi as u64),
             transmitting_party_extension: None,
             external_subscriber_number: None,
-            facility: self.tpi_inform_for_call(call_id),
+            facility: None,
             dm_ms_address: None,
             proprietary: None,
         };
@@ -78,7 +79,12 @@ impl CcBsSubentity {
         d_tx_granted.to_bitbuf(&mut sdu).expect("Failed to serialize DTxGranted");
         sdu.seek(0);
 
-        let msg = Self::build_sapmsg_stealing(sdu, target_addr, ts, None);
+        let ul_dl = if transmission_grant == TransmissionGrant::Granted {
+            UlDlAssignment::Ul
+        } else {
+            UlDlAssignment::Dl
+        };
+        let msg = Self::build_sapmsg_stealing_ul_dl(sdu, target_addr, ts, Some(usage), ul_dl);
         queue.push_back(msg);
     }
 
@@ -87,15 +93,21 @@ impl CcBsSubentity {
         queue: &mut MessageQueue,
         call_id: u16,
         requesting_party: TetraAddress,
+        tx_demand_priority: u8,
     ) -> Result<(), GroupTransitionError> {
         let Some(call) = self.active_calls.get_mut(&call_id) else {
             return Err(GroupTransitionError::UnknownCall(call_id));
         };
+        let Some(cached) = self.cached_setups.get(&call_id) else {
+            return Err(GroupTransitionError::MissingCachedSetup(call_id));
+        };
+        let dest_addr = cached.dest_addr;
 
         let state = call.state();
         Self::validate_group_transition(call_id, state, GroupEvent::TxDemand)?;
 
         let ts = call.ts;
+        let usage = call.usage;
         let dest_ssi = call.dest_gssi;
         let current_speaker = call.source_issi;
         let grant_now = matches!(state, GroupCallState::NoActiveSpeaker { .. });
@@ -103,16 +115,11 @@ impl CcBsSubentity {
             call.grant_floor(requesting_party.ssi, Some(requesting_party));
             None
         } else {
-            Some(call.queue_tx_demand(requesting_party))
+            Some(call.queue_tx_demand(requesting_party, tx_demand_priority))
         };
         if grant_now {
             self.tpi_update_talker(call_id, requesting_party.ssi);
         }
-
-        let Some(cached) = self.cached_setups.get(&call_id) else {
-            return Err(GroupTransitionError::MissingCachedSetup(call_id));
-        };
-        let dest_addr = cached.dest_addr;
 
         if let Some(queue_result) = queue_result {
             match queue_result {
@@ -130,6 +137,34 @@ impl CcBsSubentity {
                         call_id,
                         requesting_party,
                         ts,
+                        usage,
+                        TransmissionGrant::RequestQueued,
+                        Some(current_speaker),
+                    );
+                }
+                TxDemandQueueResult::ReplacedLowerPriority(replaced) => {
+                    tracing::info!(
+                        "FSM: U-TX DEMAND call_id={} ISSI {} priority={} replaced queued ISSI {}",
+                        call_id,
+                        requesting_party.ssi,
+                        tx_demand_priority,
+                        replaced.ssi
+                    );
+                    self.fsm_send_d_tx_granted_individual(
+                        queue,
+                        call_id,
+                        replaced,
+                        ts,
+                        usage,
+                        TransmissionGrant::NotGranted,
+                        Some(current_speaker),
+                    );
+                    self.fsm_send_d_tx_granted_individual(
+                        queue,
+                        call_id,
+                        requesting_party,
+                        ts,
+                        usage,
                         TransmissionGrant::RequestQueued,
                         Some(current_speaker),
                     );
@@ -140,6 +175,7 @@ impl CcBsSubentity {
                         call_id,
                         requesting_party,
                         ts,
+                        usage,
                         TransmissionGrant::NotGranted,
                         Some(current_speaker),
                     );
@@ -154,10 +190,11 @@ impl CcBsSubentity {
             call_id,
             requesting_party,
             ts,
+            usage,
             TransmissionGrant::Granted,
             Some(requesting_party.ssi),
         );
-        self.send_d_tx_granted_facch(queue, call_id, requesting_party.ssi, dest_addr.ssi, ts);
+        self.send_d_tx_granted_facch(queue, call_id, requesting_party.ssi, dest_addr.ssi, ts, usage);
 
         // Notify dashboard that the speaker changed (hangtime -> new speaker).
         self.emit(crate::net_telemetry::TelemetryEvent::GroupCallSpeakerChanged {
@@ -206,6 +243,10 @@ impl CcBsSubentity {
         let Some(call) = self.active_calls.get_mut(&call_id) else {
             return Err(GroupTransitionError::UnknownCall(call_id));
         };
+        let Some(cached) = self.cached_setups.get(&call_id) else {
+            return Err(GroupTransitionError::MissingCachedSetup(call_id));
+        };
+        let dest_addr = cached.dest_addr;
 
         let state = call.state();
         Self::validate_group_transition(call_id, state, GroupEvent::TxCeased)?;
@@ -219,6 +260,7 @@ impl CcBsSubentity {
         }
 
         let ts = call.ts;
+        let usage = call.usage;
         let dest_ssi = call.dest_gssi;
         let queued_request = call.take_queued_tx_demand();
         if let Some(requester) = queued_request {
@@ -229,15 +271,18 @@ impl CcBsSubentity {
             call.enter_hangtime(self.dltime);
         }
 
-        let Some(cached) = self.cached_setups.get(&call_id) else {
-            return Err(GroupTransitionError::MissingCachedSetup(call_id));
-        };
-        let dest_addr = cached.dest_addr;
-
         if let Some(requester) = queued_request {
             self.tpi_update_talker(call_id, requester.ssi);
-            self.fsm_send_d_tx_granted_individual(queue, call_id, requester, ts, TransmissionGrant::Granted, Some(requester.ssi));
-            self.send_d_tx_granted_facch(queue, call_id, requester.ssi, dest_addr.ssi, ts);
+            self.fsm_send_d_tx_granted_individual(
+                queue,
+                call_id,
+                requester,
+                ts,
+                usage,
+                TransmissionGrant::Granted,
+                Some(requester.ssi),
+            );
+            self.send_d_tx_granted_facch(queue, call_id, requester.ssi, dest_addr.ssi, ts, usage);
 
             // Notify dashboard that the queued speaker got the floor.
             self.emit(crate::net_telemetry::TelemetryEvent::GroupCallSpeakerChanged {
@@ -289,7 +334,7 @@ impl CcBsSubentity {
         d_tx_ceased.to_bitbuf(&mut sdu).expect("Failed to serialize DTxCeased");
         sdu.seek(0);
 
-        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, None);
+        let msg = Self::build_sapmsg_stealing(sdu, dest_addr, ts, Some(usage));
         queue.push_back(msg);
 
         queue.push_back(SapMsg {
@@ -341,7 +386,30 @@ impl CcBsSubentity {
         let dest_gssi = call.dest_gssi;
 
         self.tpi_update_talker(call_id, source_issi);
-        self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts);
+        let tpi_facility = self.tpi_inform_for_call(call_id);
+        if let Some(cached) = self.cached_setups.get_mut(&call_id) {
+            cached.pdu.calling_party_address_ssi = Some(source_issi);
+            cached.pdu.transmission_grant = TransmissionGrant::GrantedToOtherUser;
+            cached.pdu.transmission_request_permission = false;
+            cached.pdu.facility = tpi_facility;
+            cached.last_reporter = None;
+
+            let dest_addr = cached.dest_addr;
+            let (setup_sdu, setup_chan_alloc) = Self::build_compact_late_entry_d_setup_prim(&cached.pdu, usage, ts);
+            queue.push_back(Self::build_sapmsg(
+                setup_sdu,
+                Some(setup_chan_alloc),
+                dest_addr,
+                Layer2Service::Unacknowledged,
+                None,
+            ));
+        } else {
+            tracing::warn!(
+                "CMCE FSM: network speaker change call_id={} has no cached D-SETUP for late-entry refresh",
+                call_id
+            );
+        }
+        self.send_d_tx_granted_facch(queue, call_id, source_issi, dest_gssi, ts, usage);
 
         queue.push_back(SapMsg {
             sap: Sap::Control,
@@ -384,12 +452,70 @@ impl CcBsSubentity {
         Self::validate_group_transition(call_id, state, GroupEvent::NetworkCallEnd)?;
 
         if matches!(state, GroupCallState::Transmitting) {
-            if let Some(active_call) = self.active_calls.get_mut(&call_id) {
-                active_call.enter_hangtime(self.dltime);
+            let queued_request = self.active_calls.get_mut(&call_id).and_then(|active_call| {
                 active_call.brew_uuid = None;
+                active_call.take_queued_tx_demand()
+            });
+
+            if let Some(requester) = queued_request {
+                if let Some(active_call) = self.active_calls.get_mut(&call_id) {
+                    active_call.grant_floor(requester.ssi, Some(requester));
+                }
+
+                self.tpi_update_talker(call_id, requester.ssi);
+                self.fsm_send_d_tx_granted_individual(
+                    queue,
+                    call_id,
+                    requester,
+                    call.ts,
+                    call.usage,
+                    TransmissionGrant::Granted,
+                    Some(requester.ssi),
+                );
+                self.send_d_tx_granted_facch(queue, call_id, requester.ssi, call.dest_gssi, call.ts, call.usage);
+
+                self.emit(crate::net_telemetry::TelemetryEvent::GroupCallSpeakerChanged {
+                    call_id,
+                    gssi: call.dest_gssi,
+                    speaker_issi: requester.ssi,
+                });
+
+                queue.push_back(SapMsg {
+                    sap: Sap::Control,
+                    src: TetraEntity::Cmce,
+                    dest: TetraEntity::Umac,
+                    msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                        call_id,
+                        source_issi: requester.ssi,
+                        dest_gssi: call.dest_gssi,
+                        ts: call.ts,
+                        uplink_expected: true,
+                    }),
+                });
+
+                if net_brew::is_brew_gssi_routable(&self.config, call.dest_gssi) {
+                    queue.push_back(SapMsg {
+                        sap: Sap::Control,
+                        src: TetraEntity::Cmce,
+                        dest: TetraEntity::Brew,
+                        msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+                            call_id,
+                            source_issi: requester.ssi,
+                            dest_gssi: call.dest_gssi,
+                            ts: call.ts,
+                            uplink_expected: true,
+                        }),
+                    });
+                }
+                return Ok(());
             }
 
-            self.send_d_tx_ceased_facch(queue, call_id, call.dest_gssi, call.ts);
+            if let Some(active_call) = self.active_calls.get_mut(&call_id) {
+                active_call.brew_uuid = None;
+                active_call.enter_hangtime(self.dltime);
+            }
+
+            self.send_d_tx_ceased_facch(queue, call_id, call.dest_gssi, call.ts, call.usage);
             queue.push_back(SapMsg {
                 sap: Sap::Control,
                 src: TetraEntity::Cmce,

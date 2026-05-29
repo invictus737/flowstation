@@ -230,30 +230,60 @@ where
 {
     fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
         let Some(tx) = DASHBOARD_LOG_TX.get() else { return };
-        let level = event.metadata().level().to_string();
-        let mut msg = String::new();
-        let mut visitor = StringVisitor(&mut msg);
-        event.record(&mut visitor);
-        let _ = tx.try_send((level, msg));
+        let metadata = event.metadata();
+        let level = metadata.level().to_string();
+        let line = format_dashboard_event(event);
+        let _ = tx.try_send((level, line));
     }
 }
 
-struct StringVisitor<'a>(&'a mut String);
-impl tracing::field::Visit for StringVisitor<'_> {
-    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            let _ = write!(self.0, "{:?}", value);
-            // Remove surrounding quotes from debug format
-            if self.0.starts_with('"') && self.0.ends_with('"') {
-                *self.0 = self.0[1..self.0.len() - 1].to_string();
-            }
+fn format_dashboard_event(event: &tracing::Event<'_>) -> String {
+    let metadata = event.metadata();
+
+    let mut visitor = TsVisitor { ts: None };
+    event.record(&mut visitor);
+    let ts_str = visitor.ts.unwrap_or_else(|| "             ".to_string());
+
+    let file_path = metadata.file().unwrap_or("unknown");
+    let formatted_path = if let Some(src_idx) = file_path.find("/src/") {
+        let before_src = &file_path[..src_idx];
+        let after_src = &file_path[src_idx + 5..];
+        let crate_name = if let Some(tetra_idx) = before_src.rfind("tetra-") {
+            &before_src[tetra_idx + 6..]
+        } else {
+            before_src.rsplit('/').next().unwrap_or("unknown")
+        };
+
+        if let Some(last_slash) = after_src.rfind('/') {
+            let module_path = &after_src[..last_slash];
+            let filename = &after_src[last_slash + 1..];
+            let first_module = module_path.split('/').next().unwrap_or("");
+            format!("{} [{}/{}] {}", ts_str, crate_name, first_module, filename)
+        } else {
+            format!("{} [{}] {}", ts_str, crate_name, after_src)
         }
+    } else {
+        file_path.to_string()
+    };
+
+    let now = Local::now().format("%H:%M:%S%.3f").to_string();
+    let location = format!(
+        "{} {:<5} {}:{}:",
+        now,
+        metadata.level(),
+        formatted_path,
+        metadata.line().unwrap_or(0)
+    );
+
+    let mut message_buf = String::new();
+    event.record(&mut FieldsVisitor { writer: &mut message_buf });
+
+    let mut padding = 83;
+    if message_buf.starts_with("->") || message_buf.starts_with("<-") {
+        padding -= 3;
     }
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.0.push_str(value);
-        }
-    }
+
+    format!("{:<width$} {}", location, message_buf, width = padding)
 }
 
 /// Keep non-blocking tracing workers alive for the lifetime of the process.
@@ -312,18 +342,15 @@ pub fn get_default_stdout_filter() -> EnvFilter {
         // Lmac
         .add_directive("tetra_entities::lmac=info".parse().unwrap())
 
-        // Umac
-        .add_directive("tetra_entities::umac::subcomp::slotter=debug".parse().unwrap())
-        .add_directive("tetra_entities::umac=debug".parse().unwrap())
-
-        // Llc
-        .add_directive("tetra_entities::llc=debug".parse().unwrap())
-
-        // Higher layers
-        .add_directive("tetra_entities::mle=debug".parse().unwrap())
-        .add_directive("tetra_entities::cmce=debug".parse().unwrap())
-        .add_directive("tetra_entities::sndcp=debug".parse().unwrap())
-        .add_directive("tetra_entities::mm=debug".parse().unwrap())
+        // Realtime stack paths stay at info/warn in production. Verbose debug
+        // remains available through the optional debug log file.
+        .add_directive("tetra_entities::umac::subcomp::slotter=info".parse().unwrap())
+        .add_directive("tetra_entities::umac=info".parse().unwrap())
+        .add_directive("tetra_entities::llc=info".parse().unwrap())
+        .add_directive("tetra_entities::mle=info".parse().unwrap())
+        .add_directive("tetra_entities::cmce=info".parse().unwrap())
+        .add_directive("tetra_entities::sndcp=info".parse().unwrap())
+        .add_directive("tetra_entities::mm=info".parse().unwrap())
 }
 
 fn get_default_logfile_filter() -> EnvFilter {
@@ -348,11 +375,12 @@ fn setup_logging(stdout_filter: EnvFilter, outfile: Option<(String, EnvFilter)>)
                 .with_writer(file_writer)
                 .with_ansi(false);
             let stdout_layer = tracingfmt::layer().event_format(AlignedFormatter).with_writer(stdout_writer);
+            let dashboard_filter = stdout_filter.clone();
 
             tracing_subscriber::registry()
                 .with(file_layer.with_filter(outfile_filter))
                 .with(stdout_layer.with_filter(stdout_filter))
-                .with(DashboardLayer)
+                .with(DashboardLayer.with_filter(dashboard_filter))
                 .init();
         });
 
@@ -360,10 +388,11 @@ fn setup_logging(stdout_filter: EnvFilter, outfile: Option<(String, EnvFilter)>)
     } else {
         INIT_LOG.call_once(|| {
             let stdout_layer = tracingfmt::layer().event_format(AlignedFormatter).with_writer(stdout_writer);
+            let dashboard_filter = stdout_filter.clone();
 
             tracing_subscriber::registry()
                 .with(stdout_layer.with_filter(stdout_filter))
-                .with(DashboardLayer)
+                .with(DashboardLayer.with_filter(dashboard_filter))
                 .init();
         });
         LogGuards::new(vec![stdout_guard])

@@ -462,12 +462,15 @@ mod tests {
         assert_eq!(type5vec, type5.to_bitstr());
 
         let prim_ind = TpUnitdataInd {
+            time: None,
             train_type: TrainingSequence::SyncTrainSeq,
             burst_type: BurstType::SDB,
             block_type: PhyBlockType::SB2,
             block_num: PhyBlockNum::Block2,
             block: type5,
             rssi_dbfs: 0.0,
+            rx_time_ns: None,
+            rx_sample_count: None,
         };
 
         let (type1, crc_ok) = decode_cp(lchan, prim_ind, Some(scramb_code));
@@ -492,12 +495,15 @@ mod tests {
         };
         let type5 = encode_cp(prim_req);
         let prim_ind = TpUnitdataInd {
+            time: None,
             train_type: TrainingSequence::SyncTrainSeq,
             burst_type: BurstType::SDB,
             block_type: PhyBlockType::SB2,
             block_num: PhyBlockNum::Block2,
             block: type5,
             rssi_dbfs: 0.0,
+            rx_time_ns: None,
+            rx_sample_count: None,
         };
 
         let (type1, crc_ok) = decode_cp(lchan, prim_ind, Some(scramb_code));
@@ -566,12 +572,15 @@ mod tests {
         };
         let type5 = encode_cp(prim_req);
         let prim_ind = TpUnitdataInd {
+            time: None,
             train_type: TrainingSequence::NormalTrainSeq1,
             burst_type: BurstType::NDB,
             block_type: PhyBlockType::NDB,
             block_num: PhyBlockNum::Both,
             block: type5,
             rssi_dbfs: 0.0,
+            rx_time_ns: None,
+            rx_sample_count: None,
         };
 
         let (type1, crc_ok) = decode_cp(lchan, prim_ind, Some(scramb_code));

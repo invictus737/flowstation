@@ -11,6 +11,10 @@ use toml::Value;
 pub struct CfgSx1255Autocal {
     /// Enable the SX1255 autocalibration manager.
     pub enabled: bool,
+    /// Reuse a successful startup loopback calibration from calibration.toml.
+    pub quick_calibration: bool,
+    /// Runtime-derived path for quick calibration cache.
+    pub calibration_cache_path: Option<String>,
     /// Run non-streaming calibration/probing before RX/TX streams are activated.
     pub startup: bool,
     /// Run periodic non-disruptive checks while the BS is running.
@@ -28,11 +32,27 @@ pub struct CfgSx1255Autocal {
     pub temperature_sensor: Option<String>,
     /// Candidate sensor names probed when `temperature_sensor` is unset.
     pub temperature_sensor_keys: Vec<String>,
+    /// Delay normal stream startup until the SX1255 temperature stabilizes.
+    pub startup_temperature_stabilize: bool,
+    /// Temperature sampling interval during startup stabilization.
+    pub startup_temperature_interval_secs: u64,
+    /// Minimum startup stabilization wait before accepting a stable temperature.
+    pub startup_temperature_min_wait_secs: u64,
+    /// Maximum startup stabilization wait.
+    pub startup_temperature_max_wait_secs: u64,
+    /// Temperature delta considered stable during startup stabilization.
+    pub startup_temperature_stable_delta_c: f64,
+    /// Number of consecutive stable temperature intervals required at startup.
+    pub startup_temperature_stable_checks: usize,
     /// Minimum temperature delta that is considered meaningful.
     pub min_temperature_delta_c: f64,
     /// Optional reference temperature for frequency compensation.
     /// If unset, the first successful reading becomes the baseline.
     pub reference_temperature_c: Option<f64>,
+    /// Optional calibrated Celsius reference written to SoapySX TEMP_REF_C.
+    pub temperature_reference_c: Option<f64>,
+    /// Optional calibrated raw SX1255 ADC code written to SoapySX TEMP_REF_RAW.
+    pub temperature_reference_raw: Option<f64>,
     /// Frequency drift coefficient in ppm/degC. 0.0 disables retuning.
     pub temp_ppm_per_c: f64,
     /// Minimum absolute retune step per RF chain.
@@ -54,10 +74,20 @@ pub struct CfgSx1255Autocal {
     pub rf_loopback_tone_hz: f64,
     /// Calibration tone complex baseband amplitude.
     pub rf_loopback_tone_amplitude: f64,
+    /// Additional calibration tone offsets tried at startup.
+    pub rf_loopback_sweep_tones_hz: Vec<f64>,
+    /// Additional calibration tone amplitudes tried at startup.
+    pub rf_loopback_sweep_amplitudes: Vec<f64>,
     /// Number of RX/TX blocks discarded before measurements.
     pub rf_loopback_settle_blocks: usize,
     /// Number of RX/TX blocks captured for tone and floor measurements.
     pub rf_loopback_capture_blocks: usize,
+    /// Number of startup RF loopback calibration attempts.
+    pub rf_loopback_calibration_attempts: usize,
+    /// Delay between RF loopback calibration attempts.
+    pub rf_loopback_retry_delay_secs: u64,
+    /// Optional temporary TX gains used only during RF loopback calibration.
+    pub rf_loopback_tx_gains: HashMap<String, f64>,
     /// Minimum calibration tone SNR before applying IQ correction.
     pub rf_loopback_min_snr_db: f64,
     /// Maximum allowed image-correction coefficient magnitude.
@@ -74,37 +104,52 @@ impl Default for CfgSx1255Autocal {
     fn default() -> Self {
         Self {
             enabled: false,
-            startup: true,
+            quick_calibration: false,
+            calibration_cache_path: None,
+            startup: false,
             periodic: false,
             interval_secs: 3600,
             read_temperature: false,
             allow_periodic_temperature_read: false,
             temperature_sensor: None,
             temperature_sensor_keys: vec![
-                "temperature".to_string(),
-                "temp".to_string(),
                 "sx1255_temperature".to_string(),
                 "sx1255_temp".to_string(),
+                "temperature".to_string(),
+                "temp".to_string(),
             ],
+            startup_temperature_stabilize: false,
+            startup_temperature_interval_secs: 10,
+            startup_temperature_min_wait_secs: 60,
+            startup_temperature_max_wait_secs: 300,
+            startup_temperature_stable_delta_c: 0.5,
+            startup_temperature_stable_checks: 3,
             min_temperature_delta_c: 2.0,
             reference_temperature_c: None,
+            temperature_reference_c: None,
+            temperature_reference_raw: None,
             temp_ppm_per_c: 0.0,
             min_frequency_step_hz: 25.0,
-            max_frequency_correction_hz: 5000.0,
+            max_frequency_correction_hz: 300.0,
             allow_periodic_retune: false,
-            enable_dc_offset_mode: true,
-            rf_loopback_startup_check: true,
-            rf_filter_profile: "TETRA_CLEAN".to_string(),
-            rf_loopback_startup_calibration: true,
+            enable_dc_offset_mode: false,
+            rf_loopback_startup_check: false,
+            rf_filter_profile: String::new(),
+            rf_loopback_startup_calibration: false,
             rf_loopback_tone_hz: 24_000.0,
-            rf_loopback_tone_amplitude: 0.8,
+            rf_loopback_tone_amplitude: 0.35,
+            rf_loopback_sweep_tones_hz: vec![10_000.0, 18_000.0, 24_000.0, 36_000.0],
+            rf_loopback_sweep_amplitudes: vec![0.10, 0.15, 0.20, 0.25],
             rf_loopback_settle_blocks: 24,
             rf_loopback_capture_blocks: 32,
+            rf_loopback_calibration_attempts: 1,
+            rf_loopback_retry_delay_secs: 10,
+            rf_loopback_tx_gains: HashMap::new(),
             rf_loopback_min_snr_db: 20.0,
-            rf_loopback_max_image_coeff: 0.5,
+            rf_loopback_max_image_coeff: 0.95,
             rf_loopback_max_dc: 0.5,
-            rf_loopback_apply_dc: true,
-            rf_loopback_apply_iq: true,
+            rf_loopback_apply_dc: false,
+            rf_loopback_apply_iq: false,
         }
     }
 }
@@ -112,6 +157,8 @@ impl Default for CfgSx1255Autocal {
 #[derive(Default, Deserialize)]
 pub struct CfgSx1255AutocalDto {
     pub enabled: Option<bool>,
+    #[serde(alias = "quick-calibration")]
+    pub quick_calibration: Option<bool>,
     pub startup: Option<bool>,
     pub periodic: Option<bool>,
     pub interval_secs: Option<u64>,
@@ -119,8 +166,16 @@ pub struct CfgSx1255AutocalDto {
     pub allow_periodic_temperature_read: Option<bool>,
     pub temperature_sensor: Option<String>,
     pub temperature_sensor_keys: Option<Vec<String>>,
+    pub startup_temperature_stabilize: Option<bool>,
+    pub startup_temperature_interval_secs: Option<u64>,
+    pub startup_temperature_min_wait_secs: Option<u64>,
+    pub startup_temperature_max_wait_secs: Option<u64>,
+    pub startup_temperature_stable_delta_c: Option<f64>,
+    pub startup_temperature_stable_checks: Option<usize>,
     pub min_temperature_delta_c: Option<f64>,
     pub reference_temperature_c: Option<f64>,
+    pub temperature_reference_c: Option<f64>,
+    pub temperature_reference_raw: Option<f64>,
     pub temp_ppm_per_c: Option<f64>,
     pub min_frequency_step_hz: Option<f64>,
     pub max_frequency_correction_hz: Option<f64>,
@@ -131,8 +186,13 @@ pub struct CfgSx1255AutocalDto {
     pub rf_loopback_startup_calibration: Option<bool>,
     pub rf_loopback_tone_hz: Option<f64>,
     pub rf_loopback_tone_amplitude: Option<f64>,
+    pub rf_loopback_sweep_tones_hz: Option<Vec<f64>>,
+    pub rf_loopback_sweep_amplitudes: Option<Vec<f64>>,
     pub rf_loopback_settle_blocks: Option<usize>,
     pub rf_loopback_capture_blocks: Option<usize>,
+    pub rf_loopback_calibration_attempts: Option<usize>,
+    pub rf_loopback_retry_delay_secs: Option<u64>,
+    pub rf_loopback_tx_gains: Option<HashMap<String, f64>>,
     pub rf_loopback_min_snr_db: Option<f64>,
     pub rf_loopback_max_image_coeff: Option<f64>,
     pub rf_loopback_max_dc: Option<f64>,
@@ -148,6 +208,9 @@ pub fn apply_sx1255_autocal_patch(src: Option<CfgSx1255AutocalDto>) -> CfgSx1255
     if let Some(src) = src {
         if let Some(v) = src.enabled {
             cfg.enabled = v;
+        }
+        if let Some(v) = src.quick_calibration {
+            cfg.quick_calibration = v;
         }
         if let Some(v) = src.startup {
             cfg.startup = v;
@@ -170,11 +233,35 @@ pub fn apply_sx1255_autocal_patch(src: Option<CfgSx1255AutocalDto>) -> CfgSx1255
         if let Some(v) = src.temperature_sensor_keys {
             cfg.temperature_sensor_keys = v;
         }
+        if let Some(v) = src.startup_temperature_stabilize {
+            cfg.startup_temperature_stabilize = v;
+        }
+        if let Some(v) = src.startup_temperature_interval_secs {
+            cfg.startup_temperature_interval_secs = v.max(1);
+        }
+        if let Some(v) = src.startup_temperature_min_wait_secs {
+            cfg.startup_temperature_min_wait_secs = v;
+        }
+        if let Some(v) = src.startup_temperature_max_wait_secs {
+            cfg.startup_temperature_max_wait_secs = v;
+        }
+        if let Some(v) = src.startup_temperature_stable_delta_c {
+            cfg.startup_temperature_stable_delta_c = v.max(0.0);
+        }
+        if let Some(v) = src.startup_temperature_stable_checks {
+            cfg.startup_temperature_stable_checks = v.max(1);
+        }
         if let Some(v) = src.min_temperature_delta_c {
             cfg.min_temperature_delta_c = v.max(0.0);
         }
         if let Some(v) = src.reference_temperature_c {
             cfg.reference_temperature_c = Some(v);
+        }
+        if let Some(v) = src.temperature_reference_c {
+            cfg.temperature_reference_c = Some(v);
+        }
+        if let Some(v) = src.temperature_reference_raw {
+            cfg.temperature_reference_raw = Some(v);
         }
         if let Some(v) = src.temp_ppm_per_c {
             cfg.temp_ppm_per_c = v;
@@ -206,11 +293,30 @@ pub fn apply_sx1255_autocal_patch(src: Option<CfgSx1255AutocalDto>) -> CfgSx1255
         if let Some(v) = src.rf_loopback_tone_amplitude {
             cfg.rf_loopback_tone_amplitude = v.clamp(0.0, 0.95);
         }
+        if let Some(v) = src.rf_loopback_sweep_tones_hz {
+            cfg.rf_loopback_sweep_tones_hz = v.into_iter().filter(|tone| tone.is_finite() && *tone > 0.0).collect();
+        }
+        if let Some(v) = src.rf_loopback_sweep_amplitudes {
+            cfg.rf_loopback_sweep_amplitudes = v
+                .into_iter()
+                .filter(|amplitude| amplitude.is_finite())
+                .map(|amplitude| amplitude.clamp(0.0, 0.95))
+                .collect();
+        }
         if let Some(v) = src.rf_loopback_settle_blocks {
             cfg.rf_loopback_settle_blocks = v.max(1);
         }
         if let Some(v) = src.rf_loopback_capture_blocks {
             cfg.rf_loopback_capture_blocks = v.max(1);
+        }
+        if let Some(v) = src.rf_loopback_calibration_attempts {
+            cfg.rf_loopback_calibration_attempts = v.max(1);
+        }
+        if let Some(v) = src.rf_loopback_retry_delay_secs {
+            cfg.rf_loopback_retry_delay_secs = v;
+        }
+        if let Some(v) = src.rf_loopback_tx_gains {
+            cfg.rf_loopback_tx_gains = v.into_iter().map(|(name, value)| (name.to_ascii_uppercase(), value)).collect();
         }
         if let Some(v) = src.rf_loopback_min_snr_db {
             cfg.rf_loopback_min_snr_db = v.max(0.0);

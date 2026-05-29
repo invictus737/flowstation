@@ -26,6 +26,15 @@ pub fn from_toml_str(toml_str: &str) -> Result<StackConfig, Box<dyn std::error::
     // tables field: the flatten map would capture neighbor_cells_ca as an opaque
     // Value, causing the "unrecognised field" check to fire.
     let mut raw: toml::Table = toml::from_str(toml_str)?;
+    if !raw.contains_key("config_version") {
+        if raw.contains_key("radio") {
+            return Err(
+                "LibreStation requires the full BS config format with config_version, stack_mode, phy_io, net_info and cell_info; legacy [radio] config is not accepted"
+                    .into(),
+            );
+        }
+        return Err("Missing required top-level field config_version".into());
+    }
 
     // Extract neighbor_cells_ca from cell_info before typed deserialisation.
     let neighbor_cells_ca: Vec<CfgNeighborCellCa> = raw
@@ -532,6 +541,47 @@ location_area = 1
     }
 
     #[test]
+    fn test_sx1255_autocal_enabled_default_is_non_invasive() {
+        let toml = r#"
+config_version = "0.6"
+stack_mode = "Bs"
+
+[phy_io]
+backend = "SoapySdr"
+
+[phy_io.soapysdr]
+rx_freq = 431362500
+tx_freq = 438362500
+
+[phy_io.soapysdr.sx1255_autocal]
+enabled = true
+
+[net_info]
+mcc = 901
+mnc = 9999
+
+[cell_info]
+main_carrier = 1534
+freq_band = 4
+freq_offset = 12500
+duplex_spacing = 1
+reverse_operation = false
+location_area = 1
+"#;
+        let cfg = from_toml_str(toml).expect("parse failed");
+        let autocal = &cfg.phy_io.soapysdr.as_ref().expect("soapy config").sx1255_autocal;
+        assert!(autocal.enabled);
+        assert!(!autocal.startup);
+        assert!(!autocal.periodic);
+        assert!(!autocal.enable_dc_offset_mode);
+        assert!(!autocal.rf_loopback_startup_check);
+        assert!(autocal.rf_filter_profile.is_empty());
+        assert!(!autocal.rf_loopback_startup_calibration);
+        assert!(!autocal.rf_loopback_apply_dc);
+        assert!(!autocal.rf_loopback_apply_iq);
+    }
+
+    #[test]
     fn test_sx1255_autocal_rejects_unknown_nested_fields() {
         let toml = r#"
 config_version = "0.6"
@@ -561,5 +611,23 @@ reverse_operation = false
 location_area = 1
 "#;
         assert!(from_toml_str(toml).is_err(), "should reject unknown sx1255_autocal field");
+    }
+
+    #[test]
+    fn rejects_legacy_librestation_radio_only_config() {
+        let toml = r#"
+[radio]
+tx_freq = 438362500
+rx_freq = 431362500
+ppm_err = 0
+sample_rate = 72000
+rx_gain = 20
+tx_power = 89
+"#;
+        let err = from_toml_str(toml).expect_err("legacy [radio] config must not be accepted");
+        assert!(
+            err.to_string().contains("legacy [radio] config is not accepted"),
+            "unexpected error: {err}"
+        );
     }
 }

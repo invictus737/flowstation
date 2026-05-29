@@ -8,6 +8,8 @@ use tetra_pdus::umac::pdus::mac_access::MacAccess;
 use tetra_pdus::umac::pdus::mac_resource::MacResource;
 use tetra_saps::control::call_control::{CallControl, Circuit, CircuitDlMediaSource};
 use tetra_saps::control::enums::circuit_mode_type::CircuitModeType;
+use tetra_saps::lcmc::enums::{alloc_type::ChanAllocType, ul_dl_assignment::UlDlAssignment};
+use tetra_saps::lcmc::fields::chan_alloc_req::CmceChanAllocReq;
 use tetra_saps::lmm::LmmMleUnitdataReq;
 use tetra_saps::sapmsg::{SapMsg, SapMsgInner};
 use tetra_saps::tma::TmaUnitdataReq;
@@ -16,6 +18,11 @@ use tetra_saps::tmv::{TmvUnitdataInd, enums::logical_chans::LogicalChannel};
 use crate::common::ComponentTest;
 
 fn first_downlink_resource_for_ssi(msgs: &[SapMsg], ssi: u32) -> Option<MacResource> {
+    downlink_resources_for_ssi(msgs, ssi).into_iter().next()
+}
+
+fn downlink_resources_for_ssi(msgs: &[SapMsg], ssi: u32) -> Vec<MacResource> {
+    let mut resources = Vec::new();
     for msg in msgs {
         let SapMsgInner::TmvUnitdataReq(slot) = &msg.msg else {
             continue;
@@ -27,12 +34,12 @@ fn first_downlink_resource_for_ssi(msgs: &[SapMsg], ssi: u32) -> Option<MacResou
             }
             if let Ok(resource) = MacResource::from_bitbuf(&mut mac) {
                 if resource.addr.map(|addr| addr.ssi) == Some(ssi) {
-                    return Some(resource);
+                    resources.push(resource);
                 }
             }
         }
     }
-    None
+    resources
 }
 
 fn mac_access_with_sdu(issi: u32) -> BitBuffer {
@@ -70,6 +77,24 @@ fn plain_issi_tma_req(issi: u32) -> SapMsg {
             chan_alloc: None,
             tx_reporter: None,
         }),
+    }
+}
+
+fn open_swmi_dl_circuit(ts: u8, usage: u8) -> SapMsg {
+    SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Cmce,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::CmceCallControl(CallControl::Open(Circuit {
+            direction: Direction::Both,
+            ts,
+            peer_ts: None,
+            usage,
+            circuit_mode: CircuitModeType::TchS,
+            speech_service: Some(0),
+            etee_encrypted: false,
+            dl_media_source: CircuitDlMediaSource::SwMI,
+        })),
     }
 }
 
@@ -113,6 +138,152 @@ fn test_swmi_floor_does_not_trigger_ul_inactivity_timeout() {
 }
 
 #[test]
+fn test_facch_stealing_omits_optional_chan_alloc_when_needed_to_fit_stch() {
+    debug::setup_logging_verbose();
+    const TEST_GSSI: u32 = 91;
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac, TetraEntity::Cmce]);
+
+    test.submit_message(open_swmi_dl_circuit(2, 4));
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Cmce,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+            call_id: 1,
+            source_issi: 2260001,
+            dest_gssi: TEST_GSSI,
+            ts: 2,
+            uplink_expected: false,
+        }),
+    });
+    test.run_stack(Some(4));
+    let _ = test.dump_sinks();
+
+    let mut timeslots = [false; 4];
+    timeslots[1] = true;
+    let sdu_bits = "0".repeat(40);
+    test.submit_message(SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+            req_handle: 0,
+            pdu: BitBuffer::from_bitstr(&sdu_bits),
+            main_address: TetraAddress::new(TEST_GSSI, SsiType::Gssi),
+            endpoint_id: 0,
+            stealing_permission: true,
+            subscriber_class: 0,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_category: None,
+            chan_alloc: Some(CmceChanAllocReq {
+                usage: Some(4),
+                carrier: None,
+                timeslots,
+                alloc_type: ChanAllocType::Replace,
+                ul_dl_assigned: UlDlAssignment::Dl,
+            }),
+            tx_reporter: None,
+        }),
+    });
+    test.run_stack(Some(8));
+    let sink_msgs = test.dump_sinks();
+
+    let resources = downlink_resources_for_ssi(&sink_msgs, TEST_GSSI);
+    assert!(
+        resources
+            .iter()
+            .any(|resource| resource.usage_marker == Some(4) && resource.chan_alloc_element.is_none()),
+        "FACCH floor signalling on an active TCH should omit optional channel allocation; resources={resources:?}"
+    );
+}
+
+#[test]
+fn test_facch_gssi_does_not_consume_or_advertise_pending_issi_random_access() {
+    debug::setup_logging_verbose();
+    const TEST_SSI: u32 = 91;
+
+    let dltime = TdmaTime::default().add_timeslots(2);
+    let mut test = ComponentTest::new(StackMode::Bs, Some(dltime));
+    test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac, TetraEntity::Cmce]);
+
+    test.submit_message(SapMsg {
+        sap: Sap::TmvSap,
+        src: TetraEntity::Lmac,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmvUnitdataInd(TmvUnitdataInd {
+            pdu: mac_access_with_sdu(TEST_SSI),
+            block_num: PhyBlockNum::Block1,
+            logical_channel: LogicalChannel::SchHu,
+            crc_pass: true,
+            scrambling_code: 864282631,
+            rssi_dbfs: 0.0,
+            time: Some(dltime.add_timeslots(-2)),
+        }),
+    });
+    test.run_stack(Some(4));
+    let _ = test.dump_sinks();
+
+    test.submit_message(open_swmi_dl_circuit(2, 4));
+    test.submit_message(SapMsg {
+        sap: Sap::Control,
+        src: TetraEntity::Cmce,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::CmceCallControl(CallControl::FloorGranted {
+            call_id: 1,
+            source_issi: 2260001,
+            dest_gssi: TEST_SSI,
+            ts: 2,
+            uplink_expected: false,
+        }),
+    });
+    test.run_stack(Some(4));
+    let _ = test.dump_sinks();
+
+    test.submit_message(SapMsg {
+        sap: Sap::TmaSap,
+        src: TetraEntity::Llc,
+        dest: TetraEntity::Umac,
+        msg: SapMsgInner::TmaUnitdataReq(TmaUnitdataReq {
+            req_handle: 0,
+            pdu: BitBuffer::from_bitstr(&"0".repeat(40)),
+            main_address: TetraAddress::new(TEST_SSI, SsiType::Gssi),
+            endpoint_id: 0,
+            stealing_permission: true,
+            subscriber_class: 0,
+            air_interface_encryption: None,
+            stealing_repeats_flag: None,
+            data_category: None,
+            chan_alloc: None,
+            tx_reporter: None,
+        }),
+    });
+    test.run_stack(Some(8));
+    let facch_msgs = test.dump_sinks();
+    let resources = downlink_resources_for_ssi(&facch_msgs, TEST_SSI);
+    let gssi_resource = resources
+        .iter()
+        .find(|resource| resource.chan_alloc_element.is_none())
+        .unwrap_or_else(|| panic!("expected GSSI FACCH resource without chan_alloc, resources={resources:?}"));
+    assert!(
+        !gssi_resource.random_access_flag,
+        "GSSI FACCH must not advertise a pending random-access acknowledgement for numerically equal ISSI"
+    );
+
+    test.submit_message(plain_issi_tma_req(TEST_SSI));
+    test.run_stack(Some(5));
+    let issi_msgs = test.dump_sinks();
+    let issi_resource = first_downlink_resource_for_ssi(&issi_msgs, TEST_SSI).expect("expected ISSI response resource");
+    assert!(
+        issi_resource.random_access_flag,
+        "pending ISSI random-access acknowledgement must remain available after GSSI FACCH"
+    );
+}
+
+#[test]
 fn test_plain_issi_downlink_response_does_not_carry_random_access_flag() {
     debug::setup_logging_verbose();
     const TEST_ISSI: u32 = 2260082;
@@ -122,7 +293,7 @@ fn test_plain_issi_downlink_response_does_not_carry_random_access_flag() {
     test.populate_entities(vec![TetraEntity::Umac], vec![TetraEntity::Lmac]);
 
     test.submit_message(plain_issi_tma_req(TEST_ISSI));
-    test.run_stack(Some(4));
+    test.run_stack(Some(5));
     let sink_msgs = test.dump_sinks();
 
     let resource = first_downlink_resource_for_ssi(&sink_msgs, TEST_ISSI).expect("expected downlink MAC-RESOURCE for ISSI");
@@ -152,13 +323,14 @@ fn test_first_issi_downlink_after_recent_mac_access_carries_random_access_flag()
             crc_pass: true,
             scrambling_code: 864282631,
             rssi_dbfs: 0.0,
+            time: Some(dltime.add_timeslots(-2)),
         }),
     });
     test.run_stack(Some(4));
     let _ = test.dump_sinks();
 
     test.submit_message(plain_issi_tma_req(TEST_ISSI));
-    test.run_stack(Some(4));
+    test.run_stack(Some(5));
     let sink_msgs = test.dump_sinks();
 
     let resource = first_downlink_resource_for_ssi(&sink_msgs, TEST_ISSI).expect("expected downlink MAC-RESOURCE for ISSI");
@@ -188,14 +360,16 @@ fn test_stale_mac_access_does_not_mark_late_issi_downlink_as_random_access() {
             crc_pass: true,
             scrambling_code: 864282631,
             rssi_dbfs: 0.0,
+            time: Some(dltime.add_timeslots(-2)),
         }),
     });
     test.run_stack(Some(4));
     let _ = test.dump_sinks();
     test.run_stack(Some(80));
+    let _ = test.dump_sinks();
 
     test.submit_message(plain_issi_tma_req(TEST_ISSI));
-    test.run_stack(Some(4));
+    test.run_stack(Some(5));
     let sink_msgs = test.dump_sinks();
 
     let resource = first_downlink_resource_for_ssi(&sink_msgs, TEST_ISSI).expect("expected downlink MAC-RESOURCE for ISSI");
@@ -221,6 +395,7 @@ fn test_in_fragmented_sch_hu_and_sch_f() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: Some(dltime_vec1.add_timeslots(-2)),
     };
     let test_sapmsg1 = SapMsg {
         sap: Sap::TmvSap,
@@ -235,6 +410,7 @@ fn test_in_fragmented_sch_hu_and_sch_f() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: Some(dltime_vec1.add_timeslots(2)),
     };
     let test_sapmsg2 = SapMsg {
         sap: Sap::TmvSap,
@@ -285,6 +461,7 @@ fn test_in_fragmented_sch_hu_and_sch_hu() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: Some(dltime_vec1.add_timeslots(-2)),
     };
     let test_sapmsg1 = SapMsg {
         sap: Sap::TmvSap,
@@ -299,6 +476,7 @@ fn test_in_fragmented_sch_hu_and_sch_hu() {
         crc_pass: true,
         scrambling_code: 864282631,
         rssi_dbfs: 0.0,
+        time: Some(dltime_vec1.add_timeslots(2)),
     };
     let test_sapmsg2 = SapMsg {
         sap: Sap::TmvSap,

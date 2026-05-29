@@ -1,6 +1,7 @@
 use clap::Parser;
 use crossbeam_channel;
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -15,7 +16,7 @@ use tetra_core::{TdmaTime, debug};
 use tetra_entities::MessageRouter;
 use tetra_entities::net_brew::entity::BrewEntity;
 use tetra_entities::net_brew::new_websocket_transport;
-use tetra_entities::net_dashboard::DashboardServer;
+use tetra_entities::net_dashboard::{DashboardServer, set_process_running_flag};
 use tetra_entities::net_telemetry::worker::TelemetryWorker;
 use tetra_entities::net_telemetry::{
     TELEMETRY_HEARTBEAT_INTERVAL, TELEMETRY_HEARTBEAT_TIMEOUT, TELEMETRY_PROTOCOL_VERSION, TelemetrySource, telemetry_channel,
@@ -43,6 +44,30 @@ fn load_config_from_toml(cfg_path: &str) -> StackConfig {
     }
 }
 
+fn attach_runtime_config_paths(cfg: &mut StackConfig, cfg_path: &str) {
+    let config_path = Path::new(cfg_path);
+    let config_dir = config_path
+        .parent()
+        .filter(|path| !path.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let calibration_path = config_dir.join("calibration.toml");
+
+    if let Some(soapy_cfg) = cfg.phy_io.soapysdr.as_mut() {
+        soapy_cfg.sx1255_autocal.calibration_cache_path = Some(calibration_path.to_string_lossy().into_owned());
+        if soapy_cfg.device.is_none()
+            && let Ok(device) = std::env::var("LIBRESTATION_SOAPY_DEVICE")
+        {
+            soapy_cfg.device = Some(device);
+        }
+    }
+}
+
+fn canonical_config_arg(cfg_path: &str) -> String {
+    std::fs::canonicalize(cfg_path)
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| cfg_path.to_string())
+}
+
 fn start_telemetry_worker(cfg: SharedConfig, telemetry_source: TelemetrySource) -> thread::JoinHandle<()> {
     let config = cfg.config();
     let tcfg = config.telemetry.as_ref().unwrap();
@@ -63,7 +88,7 @@ fn start_telemetry_worker(cfg: SharedConfig, telemetry_source: TelemetrySource) 
         basic_auth_credentials: tcfg.credentials.clone(),
         endpoint_path: "/".to_string(),
         subprotocol: Some(TELEMETRY_PROTOCOL_VERSION.to_string()),
-        user_agent: format!("BlueStation/{}", tetra_core::STACK_VERSION),
+        user_agent: format!("LibreStation/{}", tetra_core::STACK_VERSION),
         heartbeat_interval: TELEMETRY_HEARTBEAT_INTERVAL,
         heartbeat_timeout: TELEMETRY_HEARTBEAT_TIMEOUT,
         custom_root_certs,
@@ -96,7 +121,7 @@ fn start_control_worker(cfg: SharedConfig, command_dispatchers: HashMap<TetraEnt
         basic_auth_credentials: ccfg.credentials.clone(),
         endpoint_path: "/".to_string(),
         subprotocol: Some(CONTROL_PROTOCOL_VERSION.to_string()),
-        user_agent: format!("BlueStation/{}", tetra_core::STACK_VERSION),
+        user_agent: format!("LibreStation/{}", tetra_core::STACK_VERSION),
         heartbeat_interval: CONTROL_HEARTBEAT_INTERVAL,
         heartbeat_timeout: CONTROL_HEARTBEAT_TIMEOUT,
         custom_root_certs,
@@ -180,8 +205,8 @@ fn build_bs_stack(cfg: &mut SharedConfig) -> (MessageRouter, Option<TelemetrySou
 #[command(
     author,
     version,
-    about = "TETRA BlueStation base station stack",
-    long_about = "Runs the TETRA BlueStation base station stack using the provided TOML configuration files"
+    about = "LibreStation TETRA base station stack",
+    long_about = "Runs the LibreStation embedded TETRA base station stack using the provided TOML configuration file"
 )]
 
 struct Args {
@@ -194,20 +219,24 @@ fn main() {
     eprintln!("░▀█▀░█▀▀░▀█▀░█▀▄░█▀█░░░░░█▀▄░█░░░█░█░█▀▀░█▀▀░▀█▀░█▀█░▀█▀░▀█▀░█▀█░█▀█");
     eprintln!("░░█░░█▀▀░░█░░█▀▄░█▀█░▄▄▄░█▀▄░█░░░█░█░█▀▀░▀▀█░░█░░█▀█░░█░░░█░░█░█░█░█");
     eprintln!("░░▀░░▀▀▀░░▀░░▀░▀░▀░▀░░░░░▀▀░░▀▀▀░▀▀▀░▀▀▀░▀▀▀░░▀░░▀░▀░░▀░░▀▀▀░▀▀▀░▀░▀\n");
-    eprintln!("  Wouter Bokslag / Midnight Blue");
-    eprintln!("  https://github.com/MidnightBlueLabs/tetra-bluestation");
+    eprintln!("  LibreStation for LibreSDR");
+    eprintln!("  Based on FlowStation/BlueStation. Credits: Razvan Zeces / FlowStation.network");
     eprintln!("  Version: {}", tetra_core::STACK_VERSION);
 
     // Parse command-line arguments
     let args = Args::parse();
+    let config_path = canonical_config_arg(&args.config);
 
     // Build immutable, cheaply clonable SharedConfig and build the base station stack
-    let stack_cfg = load_config_from_toml(&args.config);
+    let mut stack_cfg = load_config_from_toml(&config_path);
+    attach_runtime_config_paths(&mut stack_cfg, &config_path);
     let mut cfg = SharedConfig::from_parts(stack_cfg, None);
+    let is_running = Arc::new(AtomicBool::new(true));
+    set_process_running_flag(is_running.clone());
 
     // If dashboard is enabled, set up log capture channel BEFORE logging initialises
     let dashboard_log_rx = if cfg.config().dashboard.is_some() {
-        let (tx, rx) = crossbeam_channel::unbounded::<(String, String)>();
+        let (tx, rx) = crossbeam_channel::bounded::<(String, String)>(8192);
         debug::set_dashboard_log_sender(tx);
         Some(rx)
     } else {
@@ -226,7 +255,7 @@ fn main() {
         if has_dashboard {
             let dash_cfg = cfg.config().dashboard.clone().unwrap();
             let mut dashboard = DashboardServer::new(
-                args.config.clone(),
+                config_path.clone(),
                 dash_cfg.allow_config_api,
                 dash_cfg.allow_control_commands,
                 dash_cfg.auth_token.as_ref().map(|token| token.as_ref().to_string()),
@@ -256,12 +285,7 @@ fn main() {
                     .name("dashboard-log".into())
                     .spawn(move || {
                         while let Ok((level, msg)) = log_rx.recv() {
-                            // Filter out debug/trace noise from dashboard log tab
-                            if level == "DEBUG" || level == "TRACE" {
-                                continue;
-                            }
-                            // Filter out TDMA tick noise — thousands per second
-                            if msg.contains("tick dl") || msg.contains("tick ul") || msg.starts_with("--- tick") {
+                            if is_dashboard_log_noise(&msg) {
                                 continue;
                             }
                             dash_log.push_log(&level, msg);
@@ -311,7 +335,6 @@ fn main() {
     };
 
     // Set up Ctrl+C handler for graceful shutdown
-    let is_running = Arc::new(AtomicBool::new(true));
     let is_running_clone = is_running.clone();
     ctrlc::set_handler(move || {
         is_running_clone.store(false, Ordering::SeqCst);
@@ -322,4 +345,14 @@ fn main() {
     router.run_stack(None, Some(is_running));
 
     // router drops here → entities are dropped, networked entities disconnect.
+}
+
+fn is_dashboard_log_noise(msg: &str) -> bool {
+    msg.contains("tick dl")
+        || msg.contains("tick ul")
+        || msg.starts_with("--- tick")
+        || msg.starts_with("tick: ")
+        || msg.contains(" tick_start")
+        || msg.contains("BsChannelScheduler tick_start")
+        || msg.contains("PHY rxtx_timeslot duration")
 }

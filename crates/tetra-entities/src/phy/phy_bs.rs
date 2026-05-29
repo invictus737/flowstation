@@ -11,7 +11,7 @@ use tetra_saps::{SapMsg, SapMsgInner};
 use crate::phy::components::phy_io_file::{FileWriteMsg, PhyIoFileMode};
 use crate::phy::components::{burst_consts::*, slotter, train_consts::*};
 use crate::umac::subcomp::bs_sched::MACSCHED_TX_AHEAD;
-use crate::{MessageQueue, TetraEntityTrait};
+use crate::{MessagePrio, MessageQueue, TetraEntityTrait};
 
 use super::components::phy_io_file::PhyIoFile;
 
@@ -81,6 +81,9 @@ impl<D: RxTxDev> PhyBs<D> {
         block_num: PhyBlockNum,
         bits: BitBuffer,
         rssi_dbfs: f32,
+        rx_time: TdmaTime,
+        rx_time_ns: Option<i64>,
+        rx_sample_count: Option<i64>,
     ) {
         // Uplink timeslot is two after downlink. Thus was transmitted at dltime - 2
         let sapmsg = SapMsg {
@@ -88,20 +91,30 @@ impl<D: RxTxDev> PhyBs<D> {
             src: TetraEntity::Phy,
             dest: TetraEntity::Lmac,
             msg: SapMsgInner::TpUnitdataInd(TpUnitdataInd {
+                time: Some(rx_time),
                 train_type,
                 burst_type,
                 block_type,
                 block_num,
                 block: bits,
                 rssi_dbfs,
+                rx_time_ns,
+                rx_sample_count,
             }),
         };
-        queue.push_back(sapmsg);
+        queue.push_prio(sapmsg, MessagePrio::Immediate);
     }
 
-    fn split_rxslot_and_send_to_lmac(queue: &mut MessageQueue, burst: &RxBurstBits<'_>) {
+    fn split_rxslot_and_send_to_lmac(
+        queue: &mut MessageQueue,
+        rx_slot: &tetra_pdus::phy::traits::rxtx_dev::RxSlotBits<'_>,
+        burst: &RxBurstBits<'_>,
+    ) {
         let train_seq = burst.train_type;
         let rssi = burst.rssi_dbfs;
+        let rx_time = rx_slot.time;
+        let rx_time_ns = rx_slot.rx_timing.time_ns;
+        let rx_sample_count = rx_slot.rx_timing.sample_count;
         match train_seq {
             TrainingSequence::NormalTrainSeq1 => {
                 assert!(burst.bits.len() == NUB_BITS);
@@ -111,7 +124,18 @@ impl<D: RxTxDev> PhyBs<D> {
                 blk.copy_bits_from_bitarr(&burst.bits[NUB_BLK2_OFFSET..NUB_BLK2_OFFSET + NUB_BLK_BITS]);
                 blk.seek(0);
 
-                Self::send_rxblock_to_lmac(queue, train_seq, BurstType::NUB, PhyBlockType::NUB, PhyBlockNum::Both, blk, rssi);
+                Self::send_rxblock_to_lmac(
+                    queue,
+                    train_seq,
+                    BurstType::NUB,
+                    PhyBlockType::NUB,
+                    PhyBlockNum::Both,
+                    blk,
+                    rssi,
+                    rx_time,
+                    rx_time_ns,
+                    rx_sample_count,
+                );
             }
 
             TrainingSequence::NormalTrainSeq2 => {
@@ -120,8 +144,30 @@ impl<D: RxTxDev> PhyBs<D> {
                 let blk1 = BitBuffer::from_bitarr(&burst.bits[NUB_BLK1_OFFSET..NUB_BLK1_OFFSET + NUB_BLK_BITS]);
                 let blk2 = BitBuffer::from_bitarr(&burst.bits[NUB_BLK2_OFFSET..NUB_BLK2_OFFSET + NUB_BLK_BITS]);
 
-                Self::send_rxblock_to_lmac(queue, train_seq, BurstType::NUB, PhyBlockType::NUB, PhyBlockNum::Block1, blk1, rssi);
-                Self::send_rxblock_to_lmac(queue, train_seq, BurstType::NUB, PhyBlockType::NUB, PhyBlockNum::Block2, blk2, rssi);
+                Self::send_rxblock_to_lmac(
+                    queue,
+                    train_seq,
+                    BurstType::NUB,
+                    PhyBlockType::NUB,
+                    PhyBlockNum::Block1,
+                    blk1,
+                    rssi,
+                    rx_time,
+                    rx_time_ns,
+                    rx_sample_count,
+                );
+                Self::send_rxblock_to_lmac(
+                    queue,
+                    train_seq,
+                    BurstType::NUB,
+                    PhyBlockType::NUB,
+                    PhyBlockNum::Block2,
+                    blk2,
+                    rssi,
+                    rx_time,
+                    rx_time_ns,
+                    rx_sample_count,
+                );
             }
             TrainingSequence::ExtendedTrainSeq => {
                 assert!(burst.bits.len() == CUB_BITS);
@@ -131,7 +177,18 @@ impl<D: RxTxDev> PhyBs<D> {
                 blk.copy_bits_from_bitarr(&burst.bits[CUB_BLK2_OFFSET..CUB_BLK2_OFFSET + CUB_BLK_BITS]);
                 blk.seek(0);
 
-                Self::send_rxblock_to_lmac(queue, train_seq, BurstType::CUB, PhyBlockType::SSN1, PhyBlockNum::Block1, blk, rssi);
+                Self::send_rxblock_to_lmac(
+                    queue,
+                    train_seq,
+                    BurstType::CUB,
+                    PhyBlockType::SSN1,
+                    PhyBlockNum::Block1,
+                    blk,
+                    rssi,
+                    rx_time,
+                    rx_time_ns,
+                    rx_sample_count,
+                );
             }
 
             _ => unreachable!("BUG: unhandled match variant -- should never be reached"),
@@ -220,7 +277,13 @@ impl<D: RxTxDev> PhyBs<D> {
         // Transmit slot and receive rx data (if any trainseq was found)
         // This function is blocking and the source of timing sync in the whole stack
         // let tick_done = std::time::Instant::now();
-        let rx = self.rxtxdev.rxtx_timeslot(&tx_slot).expect("Got error from rxtx_timeslot");
+        let rx = match self.rxtxdev.rxtx_timeslot(&tx_slot) {
+            Ok(rx) => rx,
+            Err(err) => {
+                tracing::error!(error = %err, "PHY rxtx_timeslot failed");
+                return;
+            }
+        };
         // let new_tick_start = std::time::Instant::now();
         // let elapsed = new_tick_start.duration_since(tick_done);
         // tracing::debug!("rxtx_timeslot: tick_done {:?}, new_tick_start {:?}, elapsed {:?}", tick_done, new_tick_start, elapsed);
@@ -231,8 +294,19 @@ impl<D: RxTxDev> PhyBs<D> {
         // The Lmac error correction will eliminate the false positives
         for rx_slot in rx {
             if let Some(rx_slot) = rx_slot {
-                let mut slot_sent = false;
-                if rx_slot.slot.train_type != TrainingSequence::NotFound {
+                let subslot1_found = rx_slot.subslot1.train_type != TrainingSequence::NotFound;
+                let subslot2_found = rx_slot.subslot2.train_type != TrainingSequence::NotFound;
+                let any_subslot_found = subslot1_found || subslot2_found;
+
+                if any_subslot_found && rx_slot.slot.train_type != TrainingSequence::NotFound {
+                    tracing::debug!(
+                        ts=%self.dltime,
+                        fullslot=?rx_slot.slot.train_type,
+                        subslot1=?rx_slot.subslot1.train_type,
+                        subslot2=?rx_slot.subslot2.train_type,
+                        "rx_tpsap_prim suppressing ambiguous fullslot candidate because half-slot UL was detected"
+                    );
+                } else if rx_slot.slot.train_type != TrainingSequence::NotFound {
                     tracing::info!(ts=%self.dltime, "rx_tpsap_prim got {:?} in fullslot", rx_slot.slot.train_type);
 
                     if let Some(ul_rx_sender) = &self.ul_rx_sender {
@@ -240,33 +314,25 @@ impl<D: RxTxDev> PhyBs<D> {
                         let _ = ul_rx_sender.try_send(FileWriteMsg::WriteHeaderAndBlock(3, self.tick, rx_slot.slot.bits.to_vec()));
                     }
 
-                    Self::split_rxslot_and_send_to_lmac(queue, &rx_slot.slot);
-                    slot_sent = true;
+                    Self::split_rxslot_and_send_to_lmac(queue, &rx_slot, &rx_slot.slot);
                 }
-                if rx_slot.subslot1.train_type != TrainingSequence::NotFound {
+                if subslot1_found {
                     tracing::info!(ts=%self.dltime, "rx_tpsap_prim got {:?} in subslot1", rx_slot.subslot1.train_type);
-                    if slot_sent {
-                        tracing::warn!("Sending same burst twice to LMAC");
-                    }
                     if let Some(ul_rx_sender) = &self.ul_rx_sender {
                         // Log received data to file (non-blocking)
                         let _ = ul_rx_sender.try_send(FileWriteMsg::WriteHeaderAndBlock(1, self.tick, rx_slot.subslot1.bits.to_vec()));
                     }
 
-                    Self::split_rxslot_and_send_to_lmac(queue, &rx_slot.subslot1);
-                    slot_sent = true;
+                    Self::split_rxslot_and_send_to_lmac(queue, &rx_slot, &rx_slot.subslot1);
                 }
-                if rx_slot.subslot2.train_type != TrainingSequence::NotFound {
+                if subslot2_found {
                     tracing::info!(ts=%self.dltime, "rx_tpsap_prim got {:?} in subslot2", rx_slot.subslot2.train_type);
-                    if slot_sent {
-                        tracing::warn!("Sending same burst twice to LMAC");
-                    }
                     if let Some(ul_rx_sender) = &self.ul_rx_sender {
                         // Log received data to file (non-blocking)
                         let _ = ul_rx_sender.try_send(FileWriteMsg::WriteHeaderAndBlock(2, self.tick, rx_slot.subslot2.bits.to_vec()));
                     }
 
-                    Self::split_rxslot_and_send_to_lmac(queue, &rx_slot.subslot2);
+                    Self::split_rxslot_and_send_to_lmac(queue, &rx_slot, &rx_slot.subslot2);
                 }
             }
         }

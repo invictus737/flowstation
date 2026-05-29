@@ -186,11 +186,13 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
   .log-WARN{color:var(--warn);}
   .log-ERROR{color:var(--danger);}
   .log-DEBUG{color:var(--text3);}
+  .log-TRACE{color:var(--text3);}
   .log-ts{color:var(--text3);margin-right:8px;}
   .log-level{margin-right:8px;font-weight:600;min-width:38px;display:inline-block;}
   .log-INFO .log-level{color:var(--accent2);}
   .log-WARN .log-level{color:var(--warn);}
   .log-ERROR .log-level{color:var(--danger);}
+  .log-DEBUG .log-level,.log-TRACE .log-level{color:var(--text3);}
 
   /* Modal */
   .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);backdrop-filter:blur(3px);z-index:200;align-items:center;justify-content:center;padding:16px;}
@@ -388,7 +390,8 @@ pub const DASHBOARD_HTML: &str = r#"<!DOCTYPE html>
         </label>
         <select id="log-filter" style="background:var(--bg);border:1px solid var(--border2);color:var(--text2);padding:2px 6px;font-family:var(--mono);font-size:11px;border-radius:var(--r);width:auto">
           <option value="" data-i18n="filter_all">All</option>
-          <option value="INFO">INFO+</option>
+          <option value="DEBUG">DEBUG+</option>
+          <option value="INFO" selected>INFO+</option>
           <option value="WARN">WARN+</option>
           <option value="ERROR">ERROR</option>
         </select>
@@ -794,7 +797,8 @@ function appendLog(msg){
   if((lv[msg.level]??0)<(lv[f]??0))return;
   const c=document.getElementById('log-container'),l=document.createElement('div');
   l.className=`log-line log-${msg.level}`;
-  l.innerHTML=`<span class="log-ts">${msg.ts}</span><span class="log-level">${msg.level}</span>${escHtml(msg.msg)}`;
+  const full=/^\d\d:\d\d:\d\d\.\d{3}\s/.test(String(msg.msg||''));
+  l.innerHTML=full?escHtml(msg.msg):`<span class="log-ts">${msg.ts}</span><span class="log-level">${msg.level}</span>${escHtml(msg.msg)}`;
   c.appendChild(l);
   if(c.children.length>600)c.removeChild(c.firstChild);
   if(document.getElementById('log-autoscroll').checked)c.scrollTop=c.scrollHeight;
@@ -803,8 +807,13 @@ function clearLog(){document.getElementById('log-container').innerHTML='';}
 function escHtml(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
 async function loadConfig(){
-  try{const r=await fetch('/api/config',{headers:authHeaders()});if(r.ok)document.getElementById('config-editor').value=await r.text();else setConfigMsg(t('conn_error'),false);}
-  catch{setConfigMsg(t('conn_error'),false);}
+  try{
+    const r=await fetch('/api/config',{headers:authHeaders()});
+    const body=await r.text();
+    if(r.ok){document.getElementById('config-editor').value=body;setConfigMsg('',true);}
+    else setConfigMsg(`${t('conn_error')} (${r.status}): ${body}`,false);
+  }
+  catch(e){setConfigMsg(t('conn_error')+': '+e.message,false);}
 }
 async function saveConfig(){
   try{const r=await fetch('/api/config',{method:'POST',headers:authHeaders(),body:document.getElementById('config-editor').value});if(r.ok)setConfigMsg(t('saved'),true);else setConfigMsg(t('save_fail')+': '+await r.text(),false);}

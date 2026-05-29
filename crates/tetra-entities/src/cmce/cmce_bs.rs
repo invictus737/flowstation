@@ -1,6 +1,8 @@
 use crate::net_control::{ControlCommand, ControlEndpoint, ControlResponse};
 use crate::net_telemetry::TelemetrySink;
 use crate::{MessageQueue, TetraEntityTrait};
+
+const MAX_CMCE_CONTROL_COMMANDS_PER_TICK: usize = 64;
 use tetra_config::bluestation::SharedConfig;
 use tetra_core::tetra_entities::TetraEntity;
 use tetra_core::{Sap, TdmaTime, unimplemented_log};
@@ -173,13 +175,35 @@ impl TetraEntityTrait for CmceBs {
             }
         }
         if let Some(cep) = &self.control {
-            while let Some(cmd) = cep.try_recv() {
+            let mut processed = 0usize;
+            while processed < MAX_CMCE_CONTROL_COMMANDS_PER_TICK {
+                let Some(cmd) = cep.try_recv() else {
+                    break;
+                };
+                processed += 1;
                 CmceBs::do_control_command(&mut self.sds, &mut self.cc, queue, cmd, Some(cep));
+            }
+            if processed == MAX_CMCE_CONTROL_COMMANDS_PER_TICK {
+                tracing::warn!(
+                    processed,
+                    "CMCE: control command budget exhausted; deferring commands to protect RF timing"
+                );
             }
         }
         if let Some(cep) = &self.dashboard_control {
-            while let Some(cmd) = cep.try_recv() {
+            let mut processed = 0usize;
+            while processed < MAX_CMCE_CONTROL_COMMANDS_PER_TICK {
+                let Some(cmd) = cep.try_recv() else {
+                    break;
+                };
+                processed += 1;
                 CmceBs::do_control_command(&mut self.sds, &mut self.cc, queue, cmd, None);
+            }
+            if processed == MAX_CMCE_CONTROL_COMMANDS_PER_TICK {
+                tracing::warn!(
+                    processed,
+                    "CMCE: dashboard command budget exhausted; deferring commands to protect RF timing"
+                );
             }
         }
     }

@@ -300,6 +300,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
 
             // ── Receive incoming messages from transport ──
             let messages = self.transport.receive_reliable();
+            let received_count = messages.len();
             for msg in messages {
                 self.handle_incoming_binary(&msg.payload);
             }
@@ -310,6 +311,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
             }
 
             // ── Check for commands from the BrewEntity ──
+            let mut processed_commands = 0usize;
             loop {
                 let cmd = match self.command_receiver.try_recv() {
                     Ok(cmd) => cmd,
@@ -321,6 +323,7 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         return Ok(());
                     }
                 };
+                processed_commands += 1;
                 match cmd {
                     BrewCommand::RegisterSubscriber { issi } => {
                         let already_registered = self.subscriber_groups.contains_key(&issi);
@@ -519,6 +522,10 @@ impl<T: NetworkTransport> BrewWorker<T> {
                         return Ok(());
                     }
                 }
+            }
+
+            if received_count == 0 && processed_commands == 0 {
+                std::thread::sleep(Duration::from_millis(1));
             }
         }
     }

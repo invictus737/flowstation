@@ -1,7 +1,11 @@
 use soapysdr;
+use std::fs;
+use std::path::{Path, PathBuf};
 use tetra_config::bluestation::{SharedConfig, StackMode, sec_phy_soapy::CfgSoapySdr};
 
 use tetra_pdus::phy::traits::rxtx_dev::RxTxDevError;
+use tetra_pdus::phy::traits::rxtx_dev::RxTxDirection;
+use tetra_pdus::phy::traits::rxtx_dev::SoapyStreamErrorCode;
 
 use super::dsp_types::*;
 use super::soapy_settings;
@@ -11,12 +15,16 @@ use super::sx1255_autocal::{AutocalFrequencies, Sx1255Autocal};
 
 type StreamType = ComplexSample;
 const SOAPY_FREQ_OFFSET: f64 = 20000.0;
+const SOAPY_RX_STREAM_TIMEOUT_US: i64 = 20_000;
+const SOAPY_TX_STREAM_TIMEOUT_US: i64 = 50_000;
 
 pub struct RxResult {
     /// Number of samples read
     pub len: usize,
     /// Sample counter for the first sample read
     pub count: SampleCount,
+    /// Hardware timestamp of the first sample read, when reported by the SDR.
+    pub time_ns: Option<i64>,
 }
 
 pub struct SoapyIo {
@@ -30,6 +38,11 @@ pub struct SoapyIo {
     initial_time: Option<i64>,
     rx_next_count: SampleCount,
     prev_time_ns: i64,
+    last_hardware_time_ns: Option<i64>,
+    stale_hardware_time_reads: u64,
+    stale_hardware_time_warn_at: u64,
+    stream_restarts: u64,
+    stream_restart_log_at: u64,
 
     /// If false, timestamp of latest RX read is used to estimate
     /// current hardware time. This is used in case get_hardware_time
@@ -47,6 +60,7 @@ pub struct SoapyIo {
 /// Soapy/Lime timestamps can occasionally jitter by a single sample.
 /// Treat tiny deltas as contiguous to avoid triggering large block realignments downstream.
 const RX_TIMESTAMP_JITTER_TOLERANCE_SAMPLES: SampleCount = 1;
+const HARDWARE_TIME_STALE_WARN_READS: u64 = 8;
 
 /// It is annoying to repeat error handling so do that in a macro.
 /// ? could be used but then it could not print which SoapySDR call failed.
@@ -74,6 +88,7 @@ impl SoapyIo {
         let mode = cfg.config().stack_mode;
 
         let (dev, sdr_settings, detected_device) = open_device(&soapy_cfg, mode)?;
+        let librestation_runtime_settings = (detected_device == SupportedDevice::LibreStation).then(|| sdr_settings.clone());
 
         let rx_ch = sdr_settings.rx_ch;
         let tx_ch = sdr_settings.tx_ch;
@@ -82,13 +97,19 @@ impl SoapyIo {
         let (dl_corrected, _) = soapy_cfg.dl_freq_corrected();
         let (ul_corrected, _) = soapy_cfg.ul_freq_corrected();
 
+        let rx_offset = if detected_device == SupportedDevice::LibreStation {
+            0.0
+        } else {
+            SOAPY_FREQ_OFFSET
+        };
+
         let (rx_freq, tx_freq) = match mode {
             StackMode::Bs => (
-                Some(ul_corrected - SOAPY_FREQ_OFFSET), // Offset RX center frequency from carrier frequency
+                Some(ul_corrected - rx_offset), // Offset RX center frequency from carrier frequency unless the frontend is already channelized.
                 Some(dl_corrected),
             ),
             StackMode::Ms => (
-                Some(dl_corrected - SOAPY_FREQ_OFFSET), // Offset RX center frequency from carrier frequency
+                Some(dl_corrected - rx_offset), // Offset RX center frequency from carrier frequency unless the frontend is already channelized.
                 Some(ul_corrected),
             ),
             StackMode::Mon => {
@@ -189,9 +210,15 @@ impl SoapyIo {
         };
         if let Some(rx) = &mut rx {
             soapycheck!("activate RX stream", rx.activate(None));
+            tracing::info!(direction = "RX", reason = "startup", "SoapySDR stream activated");
         }
         if let Some(tx) = &mut tx {
             soapycheck!("activate TX stream", tx.activate(None));
+            tracing::info!(direction = "TX", reason = "startup", "SoapySDR stream activated");
+        }
+        set_ad936x_runtime_active();
+        if let Some(settings) = &librestation_runtime_settings {
+            reapply_librestation_runtime_settings(&dev, settings, rx_freq, tx_freq)?;
         }
         Ok(Self {
             rx_ch,
@@ -201,6 +228,11 @@ impl SoapyIo {
             initial_time: None,
             rx_next_count: 0,
             prev_time_ns: -1,
+            last_hardware_time_ns: None,
+            stale_hardware_time_reads: 0,
+            stale_hardware_time_warn_at: HARDWARE_TIME_STALE_WARN_READS,
+            stream_restarts: 0,
+            stream_restart_log_at: 1,
             use_get_hardware_time: sdr_settings.use_get_hardware_time,
             dev,
             rx,
@@ -211,9 +243,9 @@ impl SoapyIo {
 
     pub fn receive(&mut self, buffer: &mut [StreamType]) -> Result<RxResult, RxTxDevError> {
         self.sx1255_autocal.periodic(&self.dev, self.rx_ch, self.tx_ch);
-        if let Some(rx) = &mut self.rx {
+        let result = if let Some(rx) = &mut self.rx {
             // RX is enabled
-            match rx.read(&mut [buffer], 1000000) {
+            match rx.read(&mut [buffer], SOAPY_RX_STREAM_TIMEOUT_US) {
                 Ok(len) => {
                     self.sx1255_autocal.rx_startup_compensation().apply(&mut buffer[..len]);
 
@@ -222,6 +254,7 @@ impl SoapyIo {
                     // rust-soapysdr does not let us if a timestamp was available
                     // so we have to guess by checking whether it has changed from its previous value.
                     let timestamp_available = time != self.prev_time_ns;
+                    let time_ns = timestamp_available.then_some(time);
                     self.prev_time_ns = time;
 
                     if self.initial_time.is_none() && timestamp_available {
@@ -261,42 +294,138 @@ impl SoapyIo {
                     // This is used in case timestamp is missing.
                     self.rx_next_count = count + len as SampleCount;
 
-                    Ok(RxResult { len, count })
+                    Ok(RxResult { len, count, time_ns })
                 }
-                Err(_) => Err(RxTxDevError::RxReadError),
+                Err(err) => Err(soapy_error(RxTxDirection::Rx, "read stream", err)),
             }
         } else {
             // RX is disabled
             Err(RxTxDevError::RxReadError)
+        };
+
+        if let Err(err) = &result {
+            if soapy_error_needs_restart(err) {
+                self.restart_stream_after_error(RxTxDirection::Rx, "rx_read_error");
+            }
         }
+
+        result
     }
 
     pub fn transmit(&mut self, buffer: &[StreamType], count: Option<SampleCount>) -> Result<(), RxTxDevError> {
-        if let Some(tx) = &mut self.tx {
+        let result = if let Some(tx) = &mut self.tx {
             if let Some(initial_time) = self.initial_time {
-                tx.write_all(
-                    &[buffer],
-                    count.map(|count| initial_time + ticks_to_time_ns(count, self.tx_fs)),
-                    false,
-                    1000000,
-                )
-                .map_err(|_| RxTxDevError::RxReadError)
+                let at_ns = count.map(|count| initial_time + ticks_to_time_ns(count, self.tx_fs));
+                let write_result = tx
+                    .write_all(&[buffer], at_ns, false, SOAPY_TX_STREAM_TIMEOUT_US)
+                    .map_err(|err| soapy_error(RxTxDirection::Tx, "write stream", err));
+
+                if write_result.is_ok() { check_tx_status(tx) } else { write_result }
             } else {
                 // initial_time is not available, so TX is not possible yet
-                Err(RxTxDevError::RxReadError)
+                Err(RxTxDevError::LateTx {
+                    target_sample: count.unwrap_or_default(),
+                    current_sample: 0,
+                    min_headroom_samples: 0,
+                    message: "TX requested before RX timestamp established".to_string(),
+                })
             }
         } else {
             // TX is disabled
-            Err(RxTxDevError::RxReadError)
+            Err(RxTxDevError::SoapyStreamError {
+                direction: RxTxDirection::Tx,
+                code: SoapyStreamErrorCode::NotSupported,
+                operation: "write stream",
+                message: "TX stream is disabled".to_string(),
+            })
+        };
+
+        if let Err(err) = &result {
+            if soapy_error_needs_restart(err) {
+                self.restart_stream_after_error(RxTxDirection::Tx, "tx_write_error");
+            }
+        }
+
+        result
+    }
+
+    pub fn current_time(&mut self) -> Result<i64, RxTxDevError> {
+        let time = self
+            .dev
+            .get_hardware_time(None)
+            .map_err(|err| soapy_error(RxTxDirection::Device, "get hardware time", err))?;
+
+        if self.last_hardware_time_ns == Some(time) {
+            self.stale_hardware_time_reads = self.stale_hardware_time_reads.saturating_add(1);
+            if self.stale_hardware_time_reads >= self.stale_hardware_time_warn_at {
+                tracing::warn!(
+                    hardware_time_ns = time,
+                    stale_reads = self.stale_hardware_time_reads,
+                    "SoapySDR hardware time has not advanced"
+                );
+                self.stale_hardware_time_warn_at = self.stale_hardware_time_warn_at.saturating_mul(2).max(1);
+            }
+        } else {
+            self.last_hardware_time_ns = Some(time);
+            self.stale_hardware_time_reads = 0;
+            self.stale_hardware_time_warn_at = HARDWARE_TIME_STALE_WARN_READS;
+        }
+
+        Ok(time)
+    }
+
+    fn restart_stream_after_error(&mut self, direction: RxTxDirection, reason: &'static str) {
+        self.stream_restarts = self.stream_restarts.saturating_add(1);
+        let log_this_restart = self.stream_restarts >= self.stream_restart_log_at;
+        if log_this_restart {
+            self.stream_restart_log_at = self.stream_restart_log_at.saturating_mul(2).max(1);
+        }
+
+        let result = match direction {
+            RxTxDirection::Rx => {
+                if let Some(rx) = &mut self.rx {
+                    if rx.active() {
+                        let _ = rx.deactivate(None);
+                    }
+                    rx.activate(None).map_err(|err| err.to_string())
+                } else {
+                    Err("RX stream is disabled".to_string())
+                }
+            }
+            RxTxDirection::Tx => {
+                if let Some(tx) = &mut self.tx {
+                    if tx.active() {
+                        let _ = tx.deactivate(None);
+                    }
+                    tx.activate(None).map_err(|err| err.to_string())
+                } else {
+                    Err("TX stream is disabled".to_string())
+                }
+            }
+            RxTxDirection::Device => Err("device direction has no stream to restart".to_string()),
+        };
+
+        if log_this_restart || result.is_err() {
+            match result {
+                Ok(()) => tracing::warn!(
+                    ?direction,
+                    reason,
+                    stream_restarts = self.stream_restarts,
+                    "SoapySDR stream restarted"
+                ),
+                Err(err) => tracing::error!(
+                    ?direction,
+                    reason,
+                    stream_restarts = self.stream_restarts,
+                    error = %err,
+                    "SoapySDR stream restart failed"
+                ),
+            }
         }
     }
 
-    pub fn current_time(&self) -> Result<i64, RxTxDevError> {
-        self.dev.get_hardware_time(None).map_err(|_| RxTxDevError::RxReadError)
-    }
-
     /// Current hardware time as RX sample count
-    pub fn rx_current_count(&self) -> Result<SampleCount, RxTxDevError> {
+    pub fn rx_current_count(&mut self) -> Result<SampleCount, RxTxDevError> {
         if !self.rx_enabled() {
             return Ok(0);
         }
@@ -308,7 +437,7 @@ impl SoapyIo {
     }
 
     /// Current hardware time as TX sample count
-    pub fn tx_current_count(&self) -> Result<SampleCount, RxTxDevError> {
+    pub fn tx_current_count(&mut self) -> Result<SampleCount, RxTxDevError> {
         if !self.tx_enabled() {
             return Ok(0);
         }
@@ -350,6 +479,164 @@ impl SoapyIo {
 
     pub fn tx_enabled(&self) -> bool {
         self.tx.is_some()
+    }
+}
+
+fn reapply_librestation_runtime_settings(
+    dev: &soapysdr::Device,
+    settings: &SdrSettings,
+    rx_freq: Option<f64>,
+    tx_freq: Option<f64>,
+) -> Result<(), soapysdr::Error> {
+    let rx_ch = settings.rx_ch;
+    let tx_ch = settings.tx_ch;
+
+    if let Some(freq) = rx_freq {
+        soapycheck!(
+            "reapply LibreStation RX center frequency",
+            dev.set_frequency(soapysdr::Direction::Rx, rx_ch, freq, soapysdr::Args::new())
+        );
+    }
+    if let Some(freq) = tx_freq {
+        soapycheck!(
+            "reapply LibreStation TX center frequency",
+            dev.set_frequency(soapysdr::Direction::Tx, tx_ch, freq, soapysdr::Args::new())
+        );
+    }
+    if let Some(ref ant) = settings.rx_ant {
+        soapycheck!(
+            "reapply LibreStation RX antenna",
+            dev.set_antenna(soapysdr::Direction::Rx, rx_ch, ant.as_str())
+        );
+    }
+    if let Some(ref ant) = settings.tx_ant {
+        soapycheck!(
+            "reapply LibreStation TX antenna",
+            dev.set_antenna(soapysdr::Direction::Tx, tx_ch, ant.as_str())
+        );
+    }
+    for (name, gain) in &settings.rx_gain {
+        soapycheck!(
+            "reapply LibreStation RX gain",
+            dev.set_gain_element(soapysdr::Direction::Rx, rx_ch, name.as_str(), *gain)
+        );
+    }
+    for (name, gain) in &settings.tx_gain {
+        soapycheck!(
+            "reapply LibreStation TX gain",
+            dev.set_gain_element(soapysdr::Direction::Tx, tx_ch, name.as_str(), *gain)
+        );
+    }
+
+    tracing::info!("LibreStation AD936x runtime RF settings reapplied");
+    Ok(())
+}
+
+impl Drop for SoapyIo {
+    fn drop(&mut self) {
+        tracing::info!("SoapySDR shutdown: deactivating streams and putting AD936x in standby");
+        if let Some(tx) = &mut self.tx {
+            if tx.active() {
+                if let Err(err) = tx.deactivate(None) {
+                    tracing::warn!("SoapySDR shutdown: failed to deactivate TX stream: {}", err);
+                } else {
+                    tracing::info!(direction = "TX", reason = "shutdown", "SoapySDR stream deactivated");
+                }
+            }
+        }
+        if let Some(rx) = &mut self.rx {
+            if rx.active() {
+                if let Err(err) = rx.deactivate(None) {
+                    tracing::warn!("SoapySDR shutdown: failed to deactivate RX stream: {}", err);
+                } else {
+                    tracing::info!(direction = "RX", reason = "shutdown", "SoapySDR stream deactivated");
+                }
+            }
+        }
+        set_ad936x_standby();
+    }
+}
+
+fn find_ad936x_phy_path() -> Option<PathBuf> {
+    let entries = fs::read_dir("/sys/bus/iio/devices").ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = fs::read_to_string(path.join("name")).ok()?;
+        if name.trim() == "ad9361-phy" {
+            return Some(path);
+        }
+    }
+    None
+}
+
+fn write_attr<P: AsRef<Path>>(base: P, name: &str, value: &str) {
+    let path = base.as_ref().join(name);
+    if let Err(err) = fs::write(&path, value) {
+        tracing::debug!("AD936x attribute write skipped {}={}: {}", path.display(), value, err);
+    }
+}
+
+fn set_ad936x_runtime_active() {
+    let Some(path) = find_ad936x_phy_path() else { return };
+    write_attr(&path, "out_altvoltage0_RX_LO_powerdown", "0");
+    write_attr(&path, "out_altvoltage1_TX_LO_powerdown", "0");
+    write_attr(&path, "ensm_mode", "fdd");
+    tracing::info!("AD936x runtime active state requested");
+}
+
+fn set_ad936x_standby() {
+    let Some(path) = find_ad936x_phy_path() else { return };
+    write_attr(&path, "out_altvoltage1_TX_LO_powerdown", "1");
+    write_attr(&path, "out_altvoltage0_RX_LO_powerdown", "1");
+    write_attr(&path, "ensm_mode", "sleep");
+    tracing::info!("AD936x standby state requested");
+}
+
+fn check_tx_status(tx: &mut soapysdr::TxStream<StreamType>) -> Result<(), RxTxDevError> {
+    let mut chan_mask = 0;
+    let mut flags = 0;
+    let mut time_ns = 0;
+    match tx.read_status(&mut chan_mask, &mut flags, &mut time_ns, 0) {
+        Ok(status) => {
+            tracing::debug!(status, chan_mask, flags, time_ns, "SoapySDR TX stream status reported after write");
+            Ok(())
+        }
+        Err(err) if err.code == soapysdr::ErrorCode::Timeout || err.code == soapysdr::ErrorCode::NotSupported => Ok(()),
+        Err(err) => Err(soapy_error(RxTxDirection::Tx, "read TX status", err)),
+    }
+}
+
+fn soapy_error(direction: RxTxDirection, operation: &'static str, err: soapysdr::Error) -> RxTxDevError {
+    RxTxDevError::SoapyStreamError {
+        direction,
+        code: map_soapy_error_code(err.code),
+        operation,
+        message: err.message,
+    }
+}
+
+fn map_soapy_error_code(code: soapysdr::ErrorCode) -> SoapyStreamErrorCode {
+    match code {
+        soapysdr::ErrorCode::Timeout => SoapyStreamErrorCode::Timeout,
+        soapysdr::ErrorCode::StreamError => SoapyStreamErrorCode::StreamError,
+        soapysdr::ErrorCode::Corruption => SoapyStreamErrorCode::Corruption,
+        soapysdr::ErrorCode::Overflow => SoapyStreamErrorCode::Overflow,
+        soapysdr::ErrorCode::NotSupported => SoapyStreamErrorCode::NotSupported,
+        soapysdr::ErrorCode::TimeError => SoapyStreamErrorCode::TimeError,
+        soapysdr::ErrorCode::Underflow => SoapyStreamErrorCode::Underflow,
+        soapysdr::ErrorCode::Other => SoapyStreamErrorCode::Other,
+        _ => SoapyStreamErrorCode::Other,
+    }
+}
+
+fn soapy_error_needs_restart(err: &RxTxDevError) -> bool {
+    match err {
+        RxTxDevError::SoapyStreamError { code, .. } => !matches!(
+            code,
+            SoapyStreamErrorCode::Timeout | SoapyStreamErrorCode::NotSupported | SoapyStreamErrorCode::Other
+        ),
+        RxTxDevError::LateTx { .. } => false,
+        RxTxDevError::RxEndOfData | RxTxDevError::RxReadError => false,
     }
 }
 

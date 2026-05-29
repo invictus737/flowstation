@@ -266,7 +266,7 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
         custom_duplex_spacing: ci.custom_duplex_spacing,
         location_area: ci.location_area,
         neighbor_cell_broadcast: ci.neighbor_cell_broadcast.unwrap_or(0),
-        late_entry_supported: ci.late_entry_supported.unwrap_or(false),
+        late_entry_supported: ci.late_entry_supported.unwrap_or(true),
         subscriber_class: ci.subscriber_class.unwrap_or(65535), // All subscriber classes allowed
         registration: ci.registration.unwrap_or(true),
         deregistration: ci.deregistration.unwrap_or(true),
@@ -317,4 +317,43 @@ pub fn cell_dto_to_cfg(ci: CellInfoDto) -> CfgCellInfo {
 /// by users if needed.
 fn default_tetrapack_local_ranges() -> SortedDisjointSsiRanges {
     SortedDisjointSsiRanges::from_vec_ssirange(vec![SsiRange::new(0, 90)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cell_defaults_advertise_late_entry_support() {
+        let cfg = cell_dto_to_cfg(CellInfoDto {
+            main_carrier: 1534,
+            freq_band: 4,
+            freq_offset: 12500,
+            duplex_spacing: 1,
+            reverse_operation: false,
+            location_area: 2,
+            ..CellInfoDto::default()
+        });
+
+        assert!(
+            cfg.late_entry_supported,
+            "SwMI must advertise late-entry support when CMCE sends late-entry D-SETUP"
+        );
+    }
+
+    #[test]
+    fn cell_late_entry_can_still_be_explicitly_disabled() {
+        let cfg = cell_dto_to_cfg(CellInfoDto {
+            main_carrier: 1534,
+            freq_band: 4,
+            freq_offset: 12500,
+            duplex_spacing: 1,
+            reverse_operation: false,
+            location_area: 2,
+            late_entry_supported: Some(false),
+            ..CellInfoDto::default()
+        });
+
+        assert!(!cfg.late_entry_supported);
+    }
 }

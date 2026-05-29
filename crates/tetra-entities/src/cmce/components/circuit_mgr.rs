@@ -8,6 +8,7 @@ use tetra_saps::{
 };
 
 const D_SETUP_REPEATS: i32 = 1;
+const EARLY_LATE_ENTRY_INTERVAL_TIMESLOTS: i32 = multiframes!(1);
 const LATE_ENTRY_INTERVAL_TIMESLOTS: i32 = multiframes!(5);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -390,6 +391,14 @@ impl CircuitMgr {
                     // Send D-SETUP for the initial frame + 1 backup frame after circuit creation.
                     // Matches ETSI Annex D Figure D.2: 1 initial + 1 back-up on MCCH.
                     if age < frames!(D_SETUP_REPEATS) {
+                        tasks
+                            .get_or_insert_with(Vec::new)
+                            .push(CircuitMgrCmd::SendDSetup(circuit.call_id, circuit.usage, circuit.ts));
+                    }
+                    // Early late-entry: repeat every multiframe during the first
+                    // 5 multiframes so scan-list radios and very short SwMI-origin
+                    // calls do not depend on a single setup/back-up opportunity.
+                    else if age < LATE_ENTRY_INTERVAL_TIMESLOTS && (age / 4) % (EARLY_LATE_ENTRY_INTERVAL_TIMESLOTS / 4) == 0 {
                         tasks
                             .get_or_insert_with(Vec::new)
                             .push(CircuitMgrCmd::SendDSetup(circuit.call_id, circuit.usage, circuit.ts));

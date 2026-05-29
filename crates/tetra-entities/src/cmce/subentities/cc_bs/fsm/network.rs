@@ -202,6 +202,7 @@ impl CcBsSubentity {
                 setup_timeout: Some(CallTimeoutSetupPhase::T60s),
                 active_timer_started: None,
                 call_timeout,
+                call_priority: call.priority,
                 called_over_brew: false,
                 calling_over_brew: true,
                 brew_uuid: Some(brew_uuid),
@@ -253,6 +254,25 @@ impl CcBsSubentity {
 
         if call.is_active() {
             tracing::trace!("CMCE: Brew connect request for active call_id={}, ignoring", call_id);
+            return;
+        }
+
+        if !self.cached_setups.contains_key(&call_id) {
+            tracing::error!(
+                "CMCE: Brew connect request uuid={} call_id={} missing cached setup, releasing fail-closed",
+                brew_uuid,
+                call_id
+            );
+            self.release_individual_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Brew,
+                msg: SapMsgInner::CmceCallControl(CallControl::NetworkCircuitRelease {
+                    brew_uuid,
+                    cause: DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8,
+                }),
+            });
             return;
         }
 
@@ -349,7 +369,8 @@ impl CcBsSubentity {
         };
         Self::signal_umac_circuit_open(queue, &circuit, None, CircuitDlMediaSource::SwMI);
 
-        if let Err(err) = self.fsm_individual_transition_to_active(call_id) {
+        let initial_floor_holder = (!call.simplex_duplex).then_some(call.calling_addr.ssi);
+        if let Err(err) = self.fsm_individual_transition_to_active(call_id, initial_floor_holder) {
             match err {
                 IndividualTransitionError::UnknownCall(_) => {
                     tracing::warn!("CMCE: Brew connect request activation unknown call_id={}", call_id);
@@ -452,6 +473,29 @@ impl CcBsSubentity {
             ul_dl_assigned: UlDlAssignment::Both,
         };
 
+        let Some(cached) = self.cached_setups.get(&call_id) else {
+            tracing::error!(
+                "CMCE: Brew connect confirm uuid={} call_id={} missing cached setup, releasing fail-closed",
+                brew_uuid,
+                call_id
+            );
+            self.release_individual_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
+            queue.push_back(SapMsg {
+                sap: Sap::Control,
+                src: TetraEntity::Cmce,
+                dest: TetraEntity::Brew,
+                msg: SapMsgInner::CmceCallControl(CallControl::NetworkCircuitRelease {
+                    brew_uuid,
+                    cause: DisconnectCause::SwmiRequestedDisconnection.into_raw() as u8,
+                }),
+            });
+            return;
+        };
+        let circuit_mode = cached.pdu.basic_service_information.circuit_mode_type;
+        let comm_type = cached.pdu.basic_service_information.communication_type;
+        let speech_service = cached.pdu.basic_service_information.speech_service;
+        let etee_encrypted = cached.pdu.basic_service_information.encryption_flag;
+
         let grant_enum = TransmissionGrant::try_from((grant & 0x03) as u64).unwrap_or(TransmissionGrant::Granted);
         let d_connect_ack = DConnectAcknowledge {
             call_identifier: call_id,
@@ -491,17 +535,6 @@ impl CcBsSubentity {
         };
         queue.push_back(ack_msg);
 
-        let (circuit_mode, comm_type, speech_service, etee_encrypted) = if let Some(cached) = self.cached_setups.get(&call_id) {
-            (
-                cached.pdu.basic_service_information.circuit_mode_type,
-                cached.pdu.basic_service_information.communication_type,
-                cached.pdu.basic_service_information.speech_service,
-                cached.pdu.basic_service_information.encryption_flag,
-            )
-        } else {
-            (CircuitModeType::TchS, CommunicationType::P2p, Some(0), false)
-        };
-
         let circuit = CmceCircuit {
             ts_created: self.dltime,
             direction: Direction::Both,
@@ -516,7 +549,14 @@ impl CcBsSubentity {
         };
         Self::signal_umac_circuit_open(queue, &circuit, None, CircuitDlMediaSource::SwMI);
 
-        if let Err(err) = self.fsm_individual_transition_to_active(call_id) {
+        let initial_floor_holder = if call.simplex_duplex {
+            None
+        } else if grant_enum == TransmissionGrant::Granted {
+            Some(call.called_addr.ssi)
+        } else {
+            Some(call.calling_addr.ssi)
+        };
+        if let Err(err) = self.fsm_individual_transition_to_active(call_id, initial_floor_holder) {
             match err {
                 IndividualTransitionError::UnknownCall(_) => {
                     tracing::warn!("CMCE: Brew connect confirm activation unknown call_id={}", call_id);
@@ -672,6 +712,12 @@ impl CcBsSubentity {
             Ok(c) => c.clone(),
             Err(err) => {
                 tracing::warn!("CMCE: failed to allocate circuit for network call: {:?}", err);
+                queue.push_back(SapMsg {
+                    sap: Sap::Control,
+                    src: TetraEntity::Cmce,
+                    dest: TetraEntity::Brew,
+                    msg: SapMsgInner::CmceCallControl(CallControl::NetworkCallEnd { brew_uuid }),
+                });
                 return;
             }
         };

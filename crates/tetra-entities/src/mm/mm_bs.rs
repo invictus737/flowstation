@@ -292,6 +292,14 @@ impl MmBs {
 
         let was_pending = self.client_mgr.is_pending_command(issi);
         let is_new = !self.client_mgr.client_is_known(issi);
+        let group_identity_replace_supported = pdu.group_identity_location_demand.as_ref().is_some_and(|gild| {
+            gild.group_identity_attach_detach_mode == 1
+                && gild
+                    .group_identity_uplink
+                    .as_ref()
+                    .is_some_and(|giu| !giu.is_empty() && giu.iter().all(Self::supports_group_identity_uplink))
+        });
+
         if !is_new {
             // MS is re-registering while already known. Three cases:
             //
@@ -308,7 +316,6 @@ impl MmBs {
             let needs_cleanup = !swmi_commanded_update
                 && (pdu.location_update_type == LocationUpdateType::RoamingLocationUpdating
                     || pdu.location_update_type == LocationUpdateType::ServiceRestorationRoamingLocationUpdating);
-
             // needs_cleanup: Roaming = MS rebooted, need CMCE reset.
             // swmi_commanded_update: terminal may legally answer our command with
             // several LU types; do not tear down Brew/CMCE state for a commanded
@@ -316,16 +323,25 @@ impl MmBs {
             if swmi_commanded_update {
                 tracing::info!("MM: ISSI {} answered SwMI commanded location update", issi);
             } else if needs_cleanup {
-                let old_groups: Vec<u32> = self
+                let mut old_groups: Vec<u32> = self
                     .client_mgr
                     .get_client_by_issi(issi)
                     .map(|c| c.groups.iter().copied().collect())
                     .unwrap_or_default();
-                if !old_groups.is_empty() {
-                    self.emit_subscriber_update(queue, issi, old_groups, BrewSubscriberAction::Deaffiliate);
+                old_groups.sort_unstable();
+                if group_identity_replace_supported {
+                    if !old_groups.is_empty() {
+                        self.emit_subscriber_update(queue, issi, old_groups, BrewSubscriberAction::Deaffiliate);
+                    }
+                    self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
+                    self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
+                } else {
+                    // Roaming LU is a registration refresh, not an implicit group detach.
+                    // Keep CMCE/Brew listeners stable so an active or imminent group call
+                    // is not dropped just because the MS refreshed registration.
+                    tracing::info!("MM: ISSI {} roaming LU preserves current group affiliations {:?}", issi, old_groups);
+                    self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
                 }
-                self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Deregister);
-                self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
             }
             // Always reset the registration timer on any re-registration
             self.client_mgr.reset_registration_timer(issi);
@@ -354,7 +370,13 @@ impl MmBs {
             return;
         }
         if needs_brew_register {
+            let mut restore_groups_after_register = Vec::new();
             if !is_new {
+                let old_groups: Vec<u32> = self
+                    .client_mgr
+                    .get_client_by_issi(issi)
+                    .map(|c| c.groups.iter().copied().collect())
+                    .unwrap_or_default();
                 if is_itsi_attach {
                     tracing::info!(
                         "MM: ISSI {} re-attaching via ItsiAttach (returned from another network) — re-registering in Brew",
@@ -362,8 +384,20 @@ impl MmBs {
                     );
                 }
                 self.config.state_write().subscribers.register(issi);
+                if !group_identity_replace_supported && !old_groups.is_empty() {
+                    restore_groups_after_register = old_groups;
+                }
             }
             self.emit_subscriber_update(queue, issi, Vec::new(), BrewSubscriberAction::Register);
+            if !restore_groups_after_register.is_empty() {
+                {
+                    let mut state = self.config.state_write();
+                    for &gssi in &restore_groups_after_register {
+                        state.subscribers.affiliate(issi, gssi);
+                    }
+                }
+                self.emit_subscriber_update(queue, issi, restore_groups_after_register, BrewSubscriberAction::Affiliate);
+            }
         } else if was_pending {
             tracing::info!("MM: ISSI {} completed periodic registration refresh", issi);
         }
@@ -382,37 +416,53 @@ impl MmBs {
             // ETSI Table 16.49 (clause 16.10.17): mode=1 means "detach all currently
             // attached group identities and attach group identities defined in the
             // group identity uplink element."
-            if gild.group_identity_attach_detach_mode == 1 {
-                let prior_groups: Vec<u32> = self
-                    .client_mgr
-                    .get_client_by_issi(issi)
-                    .map(|client| client.groups.iter().copied().collect())
-                    .unwrap_or_default();
-                if let Err(e) = self.client_mgr.client_detach_all_groups(issi) {
-                    tracing::warn!("Failed detaching all groups for MS {}: {:?}", issi, e);
-                } else if !prior_groups.is_empty() {
-                    {
-                        let mut state = self.config.state_write();
-                        for &gssi in &prior_groups {
-                            state.subscribers.deaffiliate(issi, gssi);
-                        }
-                    }
-                    self.emit_subscriber_update(queue, issi, prior_groups, BrewSubscriberAction::Deaffiliate);
-                }
-            }
-
-            // Try to attach to requested groups, then build GroupIdentityLocationAccept element
-            let accepted_groups = if let Some(giu) = &gild.group_identity_uplink {
-                Some(self.try_attach_detach_groups(queue, issi, &giu))
+            let replace_supported = gild.group_identity_attach_detach_mode == 1
+                && gild
+                    .group_identity_uplink
+                    .as_ref()
+                    .is_some_and(|giu| !giu.is_empty() && giu.iter().all(Self::supports_group_identity_uplink));
+            if gild.group_identity_attach_detach_mode == 1 && !replace_supported {
+                tracing::warn!(
+                    "MM: ISSI {} requested group replace with no supported GroupIdentityUplink entries; rejecting without detaching current groups",
+                    issi
+                );
+                Some(GroupIdentityLocationAccept {
+                    group_identity_accept_reject: 1,
+                    group_identity_downlink: None,
+                })
             } else {
-                None
-            };
-            let gila = GroupIdentityLocationAccept {
-                group_identity_accept_reject: 0, // Accept
-                group_identity_downlink: accepted_groups,
-            };
+                if replace_supported {
+                    let prior_groups: Vec<u32> = self
+                        .client_mgr
+                        .get_client_by_issi(issi)
+                        .map(|client| client.groups.iter().copied().collect())
+                        .unwrap_or_default();
+                    if let Err(e) = self.client_mgr.client_detach_all_groups(issi) {
+                        tracing::warn!("Failed detaching all groups for MS {}: {:?}", issi, e);
+                    } else if !prior_groups.is_empty() {
+                        {
+                            let mut state = self.config.state_write();
+                            for &gssi in &prior_groups {
+                                state.subscribers.deaffiliate(issi, gssi);
+                            }
+                        }
+                        self.emit_subscriber_update(queue, issi, prior_groups, BrewSubscriberAction::Deaffiliate);
+                    }
+                }
 
-            Some(gila)
+                // Try to attach to requested groups, then build GroupIdentityLocationAccept element
+                let accepted_groups = if let Some(giu) = &gild.group_identity_uplink {
+                    Some(self.try_attach_detach_groups(queue, issi, &giu))
+                } else {
+                    None
+                };
+                let gila = GroupIdentityLocationAccept {
+                    group_identity_accept_reject: 0, // Accept
+                    group_identity_downlink: accepted_groups,
+                };
+
+                Some(gila)
+            }
         } else {
             // No GroupIdentityLocationAccept element present
             None
@@ -858,6 +908,10 @@ impl MmBs {
         }
 
         accepted_groups
+    }
+
+    fn supports_group_identity_uplink(giu: &GroupIdentityUplink) -> bool {
+        giu.gssi.is_some() && giu.vgssi.is_none() && giu.address_extension.is_none()
     }
 
     /// Sends a D-LOCATION UPDATE COMMAND to force the radio to re-register

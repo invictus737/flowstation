@@ -141,6 +141,7 @@ impl CcBsSubentity {
                 }
                 GroupTransitionError::MissingCachedSetup(_) => {
                     tracing::debug!("CMCE: network call end call_id={} missing cached setup", call_id);
+                    self.release_group_call(queue, call_id, DisconnectCause::SwmiRequestedDisconnection);
                 }
             }
         }

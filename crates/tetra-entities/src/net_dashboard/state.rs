@@ -79,13 +79,14 @@ pub struct CallEntry {
 }
 
 pub type DashboardState = Arc<RwLock<DashboardStateInner>>;
+pub const DASHBOARD_LOG_MAX: usize = 2000;
 
 impl DashboardStateInner {
     pub fn new(config_path: String) -> Self {
         Self {
             ms_map: HashMap::new(),
             calls: HashMap::new(),
-            log_ring: std::collections::VecDeque::with_capacity(500),
+            log_ring: std::collections::VecDeque::with_capacity(DASHBOARD_LOG_MAX),
             last_heard: std::collections::VecDeque::with_capacity(LAST_HEARD_MAX + 1),
             config_path,
             brew_online: false,
@@ -111,7 +112,7 @@ impl DashboardStateInner {
             level: level.to_string(),
             msg,
         };
-        if self.log_ring.len() >= 500 {
+        if self.log_ring.len() >= DASHBOARD_LOG_MAX {
             self.log_ring.pop_front();
         }
         self.log_ring.push_back(entry);

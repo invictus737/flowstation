@@ -3,8 +3,7 @@ use num::complex::ComplexFloat;
 
 use tetra_core::TdmaTime;
 use tetra_core::TrainingSequence;
-use tetra_pdus::phy::traits::rxtx_dev::RxBurstBits;
-use tetra_pdus::phy::traits::rxtx_dev::RxSlotBits;
+use tetra_pdus::phy::traits::rxtx_dev::{RxBurstBits, RxSlotBits, RxTiming};
 
 use crate::phy::components::train_consts;
 
@@ -63,6 +62,8 @@ pub struct Demodulator {
 
     /// Timeslot of latest demodulated slot
     demodulated_slot_time: TdmaTime,
+    demodulated_rx_timing: RxTiming,
+    current_rx_timing: RxTiming,
     demodulated_slot_available: bool,
 
     full_slot: SlotBurstFinder,
@@ -90,6 +91,8 @@ impl Demodulator {
             slots_since_last_valid_burst: 0,
 
             demodulated_slot_time: Default::default(),
+            demodulated_rx_timing: Default::default(),
+            current_rx_timing: Default::default(),
             demodulated_slot_available: false,
 
             full_slot: SlotBurstFinder::new(),
@@ -154,6 +157,10 @@ impl Demodulator {
         }
         self.process_sample(input, sample_counter);
         self.next_input_sample_count = sample_counter + 1;
+    }
+
+    pub fn set_rx_timing(&mut self, rx_timing: RxTiming) {
+        self.current_rx_timing = rx_timing;
     }
 
     pub fn process_sample(&mut self, input: ComplexSample, sample_counter: SampleCount) {
@@ -331,6 +338,7 @@ impl Demodulator {
                 }
 
                 self.demodulated_slot_time = self.current_slot;
+                self.demodulated_rx_timing = self.current_rx_timing;
                 self.demodulated_slot_available = true;
             }
             Mode::Ul => {
@@ -340,6 +348,7 @@ impl Demodulator {
                 // This could also be done by using a different reference_time for UL
                 // but it seems simpler to do it here.
                 self.demodulated_slot_time = self.current_slot.add_timeslots(-2);
+                self.demodulated_rx_timing = self.current_rx_timing;
                 self.demodulated_slot_available = true;
             }
             Mode::Idle => unreachable!(),
@@ -422,6 +431,7 @@ impl Demodulator {
             self.demodulated_slot_available = false;
             Some(RxSlotBits {
                 time: self.demodulated_slot_time,
+                rx_timing: self.demodulated_rx_timing,
                 slot: self.full_slot.get_burst(),
                 subslot1: self.subslot1.get_burst(),
                 subslot2: self.subslot2.get_burst(),

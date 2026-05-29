@@ -29,6 +29,7 @@ use super::worker::{BrewCommand, BrewEvent, BrewWorker};
 
 /// Hangtime before releasing group call circuit to allow reuse without re-signaling.
 const GROUP_CALL_HANGTIME_DEFAULT_SECS: u64 = 5;
+const MAX_BREW_EVENTS_PER_TICK: usize = 128;
 
 // ─── Active call tracking ─────────────────────────────────────────
 
@@ -196,7 +197,12 @@ impl BrewEntity {
 
     /// Process all pending events from the worker thread
     fn process_events(&mut self, queue: &mut MessageQueue) {
-        while let Ok(event) = self.event_receiver.try_recv() {
+        let mut processed = 0usize;
+        while processed < MAX_BREW_EVENTS_PER_TICK {
+            let Ok(event) = self.event_receiver.try_recv() else {
+                break;
+            };
+            processed += 1;
             match event {
                 BrewEvent::Connected => {
                     tracing::debug!("BrewEntity: connected to TetraPack server");
@@ -409,6 +415,13 @@ impl BrewEntity {
                     let _ = (uuid, length_bits, data);
                 }
             }
+        }
+        if processed == MAX_BREW_EVENTS_PER_TICK && !self.event_receiver.is_empty() {
+            tracing::warn!(
+                processed,
+                pending = self.event_receiver.len(),
+                "BrewEntity: event budget exhausted; deferring backhaul events to protect RF timing"
+            );
         }
     }
 
@@ -693,20 +706,16 @@ impl BrewEntity {
             return;
         };
 
-        // Move jitter buffer to draining instead of dropping it — remaining frames
-        // will continue to be played out until the buffer empties naturally.
-        if let Some(jitter) = self.dl_jitter.remove(&uuid) {
-            if let Some(ts) = call.ts {
-                if !jitter.is_empty() {
-                    tracing::debug!(
-                        "BrewEntity: GROUP_IDLE uuid={} moving {} buffered frames to drain",
-                        uuid,
-                        jitter.len()
-                    );
-                    self.draining_jitter.insert(uuid, (ts, jitter));
-                }
+        // Voice is realtime. Once GROUP_IDLE arrives the floor is ending and CMCE
+        // moves the circuit toward hangtime/signalling, so stale buffered audio must
+        // not be drained into a no-longer-active TCH.
+        if let Some(mut jitter) = self.dl_jitter.remove(&uuid) {
+            let dropped = jitter.flush();
+            if dropped > 0 {
+                tracing::debug!("BrewEntity: GROUP_IDLE uuid={} dropped {} buffered voice frames", uuid, dropped);
             }
         }
+        self.draining_jitter.remove(&uuid);
 
         tracing::info!(
             "BrewEntity: group call ended uuid={} call_id={:?} gssi={} frames={}",
@@ -770,29 +779,6 @@ impl BrewEntity {
 
         call.frame_count += 1;
 
-        // Check if resources have been allocated yet
-        let Some(ts) = call.ts else {
-            // Audio arrived before NetworkCallReady - drop it
-            if call.frame_count == 1 {
-                tracing::debug!(
-                    "BrewEntity: voice frame arrived before resources allocated, uuid={}, dropping",
-                    uuid
-                );
-            }
-            return;
-        };
-
-        // Log first voice frame per call
-        if call.frame_count == 1 {
-            tracing::info!(
-                "BrewEntity: voice frame #{} uuid={} len={} bytes ts={}",
-                call.frame_count,
-                uuid,
-                data.len(),
-                ts
-            );
-        }
-
         // STE format: byte 0 = header (control bits), bytes 1-35 = 274 ACELP bits for TCH/S.
         // Strip the STE header and pass only the ACELP payload.
         if data.len() < 36 {
@@ -800,6 +786,19 @@ impl BrewEntity {
             return;
         }
         let acelp_data = data[1..].to_vec(); // 35 bytes = 280 bits, of which 274 are ACELP
+
+        if call.frame_count == 1 {
+            tracing::info!(
+                "BrewEntity: voice frame #{} uuid={} len={} bytes ts={:?}",
+                call.frame_count,
+                uuid,
+                data.len(),
+                call.ts
+            );
+        }
+        if call.ts.is_none() && call.frame_count == 1 {
+            tracing::debug!("BrewEntity: buffering voice before NetworkCallReady uuid={}", uuid);
+        }
 
         self.dl_jitter
             .entry(uuid)
@@ -828,28 +827,6 @@ impl BrewEntity {
             if let Some(frame) = jitter.pop_ready() {
                 to_send.push((ts, *uuid, jitter.target_frames(), frame));
             }
-        }
-
-        // Also drain buffers from calls that ended (GROUP_IDLE) but still have frames buffered.
-        let finished: Vec<Uuid> = self
-            .draining_jitter
-            .iter_mut()
-            .filter_map(|(uuid, (ts, jitter))| {
-                if *ts != self.dltime.t {
-                    return None;
-                }
-                match jitter.pop_drain() {
-                    Some(frame) => {
-                        to_send.push((*ts, *uuid, 0, frame));
-                        None
-                    }
-                    None => Some(*uuid),
-                }
-            })
-            .collect();
-        for uuid in finished {
-            tracing::debug!("BrewEntity: drain complete for uuid={}", uuid);
-            self.draining_jitter.remove(&uuid);
         }
 
         for (ts, uuid, target_frames, frame) in to_send {

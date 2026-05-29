@@ -1,10 +1,10 @@
 [package]
-name = "bluestation-bs"
+name = "librestation-bs"
 version.workspace = true
 edition.workspace = true
 
 [[bin]]
-name = "bluestation-bs"
+name = "librestation-bs"
 path = "src/main.rs"
 
 [dependencies]
